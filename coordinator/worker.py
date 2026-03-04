@@ -208,21 +208,43 @@ class BulkChunkProcessor:
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn:
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
+                chunk_id_str = str(chunk["chunk_id"])
                 with src_conn.cursor() as src_cur:
                     src_cur.arraysize = batch_size
                     src_cur.prefetchrows = batch_size
+                    t0 = time.monotonic()
                     src_cur.execute(select_sql, select_params)
+                    logger.info(
+                        "Bulk SELECT executed",
+                        extra={"chunk_id": chunk_id_str, "elapsed_ms": round((time.monotonic() - t0) * 1000)},
+                    )
                     with tgt_conn.cursor() as tgt_cur:
+                        batch_no = 0
                         while True:
+                            t_fetch = time.monotonic()
                             rows = src_cur.fetchmany(batch_size)
+                            fetch_ms = round((time.monotonic() - t_fetch) * 1000)
                             if not rows:
                                 break
+                            batch_no += 1
+                            t_insert = time.monotonic()
                             tgt_cur.executemany(insert_sql, rows, batcherrors=True)
+                            insert_ms = round((time.monotonic() - t_insert) * 1000)
+                            t_commit = time.monotonic()
                             tgt_conn.commit()
+                            commit_ms = round((time.monotonic() - t_commit) * 1000)
                             rows_processed += len(rows)
-                            logger.debug(
+                            logger.info(
                                 "Bulk batch applied",
-                                extra={"chunk_id": str(chunk["chunk_id"]), "batch": len(rows), "total": rows_processed},
+                                extra={
+                                    "chunk_id": chunk_id_str,
+                                    "batch": batch_no,
+                                    "rows": len(rows),
+                                    "total": rows_processed,
+                                    "fetch_ms": fetch_ms,
+                                    "insert_ms": insert_ms,
+                                    "commit_ms": commit_ms,
+                                },
                             )
 
         return rows_processed
