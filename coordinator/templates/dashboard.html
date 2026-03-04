@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DBZ Coordinator</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; color: #1f2937; }
+      h1 { margin: 0 0 16px; }
+      .status-grid { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 10px; margin-bottom: 20px; }
+      .card { border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; background: #f9fafb; }
+      .name { font-size: 12px; color: #6b7280; text-transform: uppercase; }
+      .value { margin-top: 6px; font-weight: 700; }
+      .message { margin-top: 6px; font-size: 12px; color: #4b5563; min-height: 30px; white-space: pre-wrap; }
+      .up { color: #166534; }
+      .down { color: #991b1b; }
+      .unknown { color: #92400e; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 10px; border-bottom: 1px solid #e5e7eb; }
+      th { font-size: 12px; color: #6b7280; text-transform: uppercase; }
+      .muted { color: #6b7280; }
+      .error { color: #991b1b; margin-bottom: 12px; }
+      @media (max-width: 900px) { .status-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
+
+      /* Clickable rows */
+      tbody tr { cursor: pointer; transition: background 0.1s; }
+      tbody tr:hover { background: #f3f4f6; }
+
+      /* Multi-select checkboxes */
+      .multiselect-box {
+        border: 1px solid #d1d5db; border-radius: 6px;
+        max-height: 160px; overflow-y: auto; background: #fff;
+      }
+      .multiselect-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 10px; cursor: pointer; font-size: 13px; font-weight: 400;
+        transition: background .1s;
+      }
+      .multiselect-item:hover { background: #f3f4f6; }
+      .multiselect-item input[type=checkbox] { cursor: pointer; margin: 0; }
+      .multiselect-item-disabled { opacity: 0.45; cursor: not-allowed; }
+      .multiselect-item-disabled:hover { background: transparent; }
+      .multiselect-item-disabled input[type=checkbox] { cursor: not-allowed; }
+      .pk-notice {
+        font-size: 12px; margin-top: 6px; padding: 6px 10px;
+        background: #d1fae5; color: #065f46; border-radius: 6px;
+      }
+      .no-pk-notice {
+        font-size: 12px; margin-top: 6px; padding: 6px 10px;
+        background: #fef3c7; color: #92400e; border-radius: 6px;
+      }
+      .cols-loading { font-size: 13px; color: #6b7280; padding: 8px 10px; }
+
+      /* Status badges */
+      .badge {
+        display: inline-block; padding: 2px 8px; border-radius: 12px;
+        font-size: 12px; font-weight: 600;
+      }
+      .badge-none    { background: #f3f4f6; color: #6b7280; }
+      .badge-running { background: #dbeafe; color: #1d4ed8; }
+      .badge-done    { background: #d1fae5; color: #065f46; }
+      .badge-error   { background: #fee2e2; color: #991b1b; }
+      .badge-other   { background: #fef3c7; color: #92400e; }
+
+      /* Overlay */
+      .overlay {
+        position: fixed; inset: 0; background: rgba(0,0,0,.35);
+        z-index: 100; opacity: 0; pointer-events: none;
+        transition: opacity .2s;
+      }
+      .overlay.visible { opacity: 1; pointer-events: all; }
+
+      /* Side panel */
+      .side-panel {
+        position: fixed; top: 0; right: 0; bottom: 0;
+        width: 440px; max-width: 100vw;
+        background: #fff; box-shadow: -4px 0 24px rgba(0,0,0,.12);
+        z-index: 101; display: flex; flex-direction: column;
+        transform: translateX(100%); transition: transform .22s ease;
+      }
+      .side-panel.visible { transform: translateX(0); }
+
+      .panel-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 16px 20px; border-bottom: 1px solid #e5e7eb;
+        flex-shrink: 0;
+      }
+      .panel-header h2 { margin: 0; font-size: 16px; }
+      .btn-close {
+        background: none; border: none; cursor: pointer;
+        font-size: 20px; color: #6b7280; line-height: 1; padding: 2px 6px;
+      }
+      .btn-close:hover { color: #111; }
+
+      .panel-body { padding: 20px; overflow-y: auto; flex: 1; }
+
+      /* Create-job form */
+      .form-group { margin-bottom: 16px; }
+      .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #374151; }
+      .form-group input[type=text], .form-group select {
+        width: 100%; box-sizing: border-box;
+        border: 1px solid #d1d5db; border-radius: 6px;
+        padding: 8px 10px; font-size: 14px; color: #1f2937;
+      }
+      .form-group input[readonly] { background: #f9fafb; color: #6b7280; }
+      .radio-group { display: flex; gap: 16px; margin-top: 4px; }
+      .radio-group label { font-weight: 400; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+      .hint { font-weight: 400; color: #9ca3af; font-size: 12px; }
+      .form-error { color: #991b1b; font-size: 13px; margin-bottom: 12px; padding: 8px 10px; background: #fee2e2; border-radius: 6px; white-space: pre-wrap; font-family: monospace; }
+      .form-success { color: #065f46; font-size: 13px; margin-bottom: 12px; padding: 8px 10px; background: #d1fae5; border-radius: 6px; }
+      .btn-primary {
+        display: block; width: 100%; padding: 10px;
+        background: #1d4ed8; color: #fff; border: none; border-radius: 6px;
+        font-size: 14px; font-weight: 600; cursor: pointer;
+      }
+      .btn-primary:hover { background: #1e40af; }
+      .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
+      .btn-danger {
+        display: block; width: 100%; padding: 10px;
+        background: #fff; color: #991b1b; border: 1px solid #fca5a5; border-radius: 6px;
+        font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 8px;
+      }
+      .btn-danger:hover { background: #fee2e2; }
+      .btn-danger:disabled { opacity: .5; cursor: not-allowed; }
+      .warn-box { padding: 10px 12px; background: #fef3c7; color: #92400e; border-radius: 6px; font-size: 13px; margin-top: 12px; white-space: pre-wrap; }
+
+      /* Job-details */
+      .detail-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .detail-table tr { border-bottom: 1px solid #f3f4f6; }
+      .detail-table td { padding: 8px 4px; vertical-align: top; }
+      .detail-table td:first-child { color: #6b7280; width: 46%; font-weight: 500; white-space: nowrap; }
+      .detail-table td:last-child { word-break: break-all; }
+      .section-title { font-size: 12px; text-transform: uppercase; color: #9ca3af; font-weight: 600; margin: 20px 0 8px; letter-spacing: .05em; }
+      .loading { color: #6b7280; font-size: 14px; text-align: center; padding: 40px 0; }
+
+      /* Chunks table inside panel */
+      .chunks-summary { font-size: 12px; color: #4b5563; margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 12px; }
+      .chunks-summary span { white-space: nowrap; }
+      .chunks-wrap { max-height: 320px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; }
+      .chunks-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .chunks-table th { position: sticky; top: 0; background: #f9fafb; padding: 6px 8px; text-align: left; font-size: 11px; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
+      .chunks-table td { padding: 6px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+      .chunks-table tr:last-child td { border-bottom: none; }
+
+      /* Progress cell in jobs list */
+      .progress-cell { font-size: 12px; color: #4b5563; white-space: nowrap; }
+      .progress-cell .speed { color: #1d4ed8; margin-left: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Coordinator Dashboard</h1>
+
+    <section class="status-grid">
+      {% for item in service_statuses %}
+      <div class="card" data-service-key="{{ item.key }}">
+        <div class="name">{{ item.name }}</div>
+        <div class="value {{ item.status|lower }}">{{ item.status|upper }}</div>
+        <div class="message">{{ item.message or "" }}</div>
+      </div>
+      {% endfor %}
+    </section>
+
+    <section>
+      <h2>Таблицы / Jobs</h2>
+      {% if jobs_error %}
+      <div class="error">{{ jobs_error }}</div>
+      {% endif %}
+      {% if source_tables_error %}
+      <div class="error">{{ source_tables_error }}</div>
+      {% endif %}
+
+      <table>
+        <thead>
+          <tr>
+            <th>Source Table</th>
+            <th>Target Table</th>
+            <th>Mode</th>
+            <th>Status</th>
+            <th>Прогресс</th>
+            <th>Job ID</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if table_statuses %}
+            {% for item in table_statuses %}
+            <tr
+              data-source-table="{{ item.source_table }}"
+              data-status="{{ item.status }}"
+              data-job-id="{{ item.job_id }}"
+            >
+              <td>{{ item.source_table }}</td>
+              <td>{{ item.target_table }}</td>
+              <td>{{ item.mode }}</td>
+              <td>
+                {% set s = item.status %}
+                {% if s == "не мигрирована" %}
+                  <span class="badge badge-none">{{ s }}</span>
+                {% elif s in ["completed"] %}
+                  <span class="badge badge-done">{{ s }}</span>
+                {% elif s in ["bulk_running", "cdc_accumulating", "cdc_catchup", "cdc_streaming", "bulk_done", "pending"] %}
+                  <span class="badge badge-running">{{ s }}</span>
+                {% elif s in ["failed", "error"] %}
+                  <span class="badge badge-error">{{ s }}</span>
+                {% else %}
+                  <span class="badge badge-other">{{ s }}</span>
+                {% endif %}
+              </td>
+              <td class="progress-cell" id="progress-{{ item.job_id }}"><span class="muted">—</span></td>
+              <td class="muted">{{ item.job_id }}</td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr>
+              <td colspan="6" class="muted">Нет доступных таблиц source schema</td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Overlay -->
+    <div id="overlay" class="overlay"></div>
+
+    <!-- Side panel -->
+    <div id="side-panel" class="side-panel" role="dialog" aria-modal="true">
+      <div class="panel-header">
+        <h2 id="panel-title"></h2>
+        <button class="btn-close" id="panel-close" title="Закрыть">&#x2715;</button>
+      </div>
+      <div class="panel-body" id="panel-body"></div>
+    </div>
+
+    <script>
+      (function () {
+        /* ─── Constants ─── */
+        const POLL_INTERVAL_MS = 5000;
+        const STATUS_CLASSES = ["up", "down", "unknown", "degraded"];
+        const NOT_MIGRATED = "не мигрирована";
+
+        /* ─── Service-status polling ─── */
+        function normalizeStatus(status) {
+          const value = String(status || "unknown").toLowerCase();
+          return STATUS_CLASSES.includes(value) ? value : "unknown";
+        }
+
+        async function fetchJson(url) {
+          const response = await fetch(url, {
+            method: "GET",
+            headers: { "Accept": "application/json" },
+            cache: "no-store",
+          });
+          if (!response.ok) throw new Error("HTTP " + response.status + " for " + url);
+          return response.json();
+        }
+
+        function setStatus(serviceKey, payload) {
+          const card = document.querySelector('[data-service-key="' + serviceKey + '"]');
+          if (!card) return;
+          const valueEl = card.querySelector(".value");
+          if (!valueEl) return;
+          const messageEl = card.querySelector(".message");
+          const normalized = normalizeStatus(payload && payload.status);
+          valueEl.classList.remove(...STATUS_CLASSES);
+          valueEl.classList.add(normalized);
+          valueEl.textContent = normalized.toUpperCase();
+          if (messageEl) {
+            messageEl.textContent = payload && payload.message ? String(payload.message) : "";
+          }
+        }
+
+        function mapStatuses(systemStatus, srcConnection, dstConnection, stateConnection, kafkaConnection, connectConnection) {
+          const services = systemStatus && systemStatus.services ? systemStatus.services : {};
+          return {
+            src_db:       srcConnection     || services.src_db       || { status: "unknown" },
+            dst_db:       dstConnection     || services.dst_db       || { status: "unknown" },
+            statedb:      stateConnection   || services.statedb      || { status: "unknown" },
+            kafka:        kafkaConnection   || services.kafka        || { status: "unknown" },
+            kafkaconnect: connectConnection || services.kafka_connect || { status: "unknown" },
+          };
+        }
+
+        async function refreshStatuses() {
+          try {
+            const [systemStatus, srcConn, dstConn, stateConn, kafkaConn, connectConn] = await Promise.all([
+              fetchJson("/api/system-status"),
+              fetchJson("/api/connections/src-db"),
+              fetchJson("/api/connections/dst-db"),
+              fetchJson("/api/connections/statedb"),
+              fetchJson("/api/connections/kafka"),
+              fetchJson("/api/connections/kafka-connect"),
+            ]);
+            const next = mapStatuses(systemStatus, srcConn, dstConn, stateConn, kafkaConn, connectConn);
+            Object.entries(next).forEach(([key, payload]) => setStatus(key, payload));
+          } catch (err) {
+            console.warn("[dashboard] failed to refresh statuses", err);
+          }
+        }
+
+        refreshStatuses();
+        setInterval(refreshStatuses, POLL_INTERVAL_MS);
+
+        /* ─── Panel helpers ─── */
+        const overlay   = document.getElementById("overlay");
+        const sidePanel = document.getElementById("side-panel");
+        const panelTitle = document.getElementById("panel-title");
+        const panelBody  = document.getElementById("panel-body");
+        const panelClose = document.getElementById("panel-close");
+
+        function openPanel(title, html) {
+          panelTitle.textContent = title;
+          panelBody.innerHTML = html;
+          overlay.classList.add("visible");
+          sidePanel.classList.add("visible");
+        }
+
+        function closePanel() {
+          overlay.classList.remove("visible");
+          sidePanel.classList.remove("visible");
+        }
+
+        panelClose.addEventListener("click", closePanel);
+        overlay.addEventListener("click", closePanel);
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") closePanel();
+        });
+
+        /* ─── Create-job panel ─── */
+        function renderCreateJobForm(sourceTable) {
+          return `
+            <form id="create-job-form" autocomplete="off">
+              <div class="form-group">
+                <label>Source Table</label>
+                <input type="text" id="f-source" value="${escHtml(sourceTable)}" readonly>
+              </div>
+              <div class="form-group">
+                <label>Target Table</label>
+                <input type="text" id="f-target" value="${escHtml(sourceTable)}">
+              </div>
+              <div class="form-group">
+                <label>Migration Mode</label>
+                <div class="radio-group">
+                  <label><input type="radio" name="mode" value="cdc" checked> CDC (live data)</label>
+                  <label><input type="radio" name="mode" value="static"> STATIC (archived)</label>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Message Key Columns <span class="hint">— необязательно, если есть PK</span></label>
+                <div id="cols-loading" class="cols-loading">Загрузка колонок…</div>
+                <div id="cols-multiselect" style="display:none">
+                  <div class="multiselect-box" id="cols-checkboxes"></div>
+                  <div id="pk-notice" style="display:none"></div>
+                </div>
+              </div>
+              <div id="form-msg" class="form-error" style="display:none"></div>
+              <button type="submit" class="btn-primary" id="f-submit">Create Job</button>
+            </form>
+          `;
+        }
+
+        async function loadColumns(sourceTable) {
+          const loadingEl    = document.getElementById("cols-loading");
+          const multiselect  = document.getElementById("cols-multiselect");
+          const checkboxesEl = document.getElementById("cols-checkboxes");
+          const pkNoticeEl   = document.getElementById("pk-notice");
+
+          try {
+            const data = await fetchJson("/api/v1/tables/" + encodeURIComponent(sourceTable) + "/columns");
+            const { columns = [], pk_columns = [], not_null_columns = [] } = data;
+            const notNullSet = new Set(not_null_columns);
+
+            checkboxesEl.innerHTML = columns.map(col => {
+              const isNotNull = notNullSet.has(col);
+              if (isNotNull) {
+                return `<label class="multiselect-item">
+                  <input type="checkbox" name="key_col" value="${escHtml(col)}">
+                  ${escHtml(col)}
+                </label>`;
+              } else {
+                return `<label class="multiselect-item multiselect-item-disabled" title="Нельзя использовать как key column: nullable">
+                  <input type="checkbox" name="key_col" value="${escHtml(col)}" disabled>
+                  ${escHtml(col)} <span class="hint">(nullable — недоступно)</span>
+                </label>`;
+              }
+            }).join("");
+
+            if (pk_columns.length > 0) {
+              pkNoticeEl.className = "pk-notice";
+              pkNoticeEl.innerHTML = "PK обнаружен: <strong>" + escHtml(pk_columns.join(", ")) +
+                "</strong>. Key Columns необязательны.";
+              pkNoticeEl.style.display = "block";
+            } else {
+              pkNoticeEl.className = "no-pk-notice";
+              pkNoticeEl.textContent = "PK не обнаружен. Для CDC необходимо выбрать Key Columns.";
+              pkNoticeEl.style.display = "block";
+            }
+
+            loadingEl.style.display = "none";
+            multiselect.style.display = "block";
+          } catch (err) {
+            loadingEl.textContent = "Не удалось загрузить колонки: " + String(err.message || err);
+          }
+        }
+
+        function buildErrorMessage(data) {
+          let msg = data.message || data.error || "Unknown error";
+          if (data.details && typeof data.details === "object" && Object.keys(data.details).length > 0) {
+            msg += "\n" + JSON.stringify(data.details, null, 2);
+          }
+          return msg;
+        }
+
+        function bindCreateJobForm(sourceTable) {
+          const form = document.getElementById("create-job-form");
+          if (!form) return;
+
+          loadColumns(sourceTable);
+
+          form.addEventListener("submit", async function (e) {
+            e.preventDefault();
+            const msgEl  = document.getElementById("form-msg");
+            const btn    = document.getElementById("f-submit");
+            const source = document.getElementById("f-source").value.trim();
+            const target = document.getElementById("f-target").value.trim();
+            const mode   = form.querySelector("input[name=mode]:checked").value;
+
+            const keyColumns = Array.from(
+              form.querySelectorAll("input[name=key_col]:checked")
+            ).map(cb => cb.value);
+
+            msgEl.style.display = "none";
+            btn.disabled = true;
+            btn.textContent = "Creating…";
+
+            try {
+              const resp = await fetch("/api/v1/jobs", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  table_name: source,
+                  target_table_name: target || undefined,
+                  migration_mode: mode,
+                  message_key_columns: keyColumns.length ? keyColumns : null,
+                }),
+              });
+              const data = await resp.json();
+              if (!resp.ok) {
+                throw new Error(buildErrorMessage(data));
+              }
+              msgEl.className = "form-success";
+              msgEl.textContent = "Job создан: " + (data.job_id || "OK");
+              msgEl.style.display = "block";
+              btn.textContent = "Done";
+              setTimeout(function () { location.reload(); }, 1200);
+            } catch (err) {
+              msgEl.className = "form-error";
+              msgEl.textContent = String(err.message || err);
+              msgEl.style.display = "block";
+              btn.disabled = false;
+              btn.textContent = "Create Job";
+            }
+          });
+        }
+
+        /* ─── Job-details panel ─── */
+        function statusBadgeHtml(status) {
+          let cls = "badge-other";
+          if (!status || status === NOT_MIGRATED) cls = "badge-none";
+          else if (status === "completed")  cls = "badge-done";
+          else if (["bulk_running","cdc_accumulating","cdc_catchup","cdc_streaming","bulk_done","pending"].includes(status)) cls = "badge-running";
+          else if (["failed","error"].includes(status)) cls = "badge-error";
+          return `<span class="badge ${cls}">${escHtml(status || "—")}</span>`;
+        }
+
+        function row(label, value) {
+          return `<tr><td>${escHtml(label)}</td><td>${value == null || value === "" ? '<span class="muted">—</span>' : escHtml(String(value))}</td></tr>`;
+        }
+
+        function renderJobDetails(job) {
+          const isCdc = job.migration_mode === "cdc";
+
+          let html = `<table class="detail-table">`;
+
+          html += `<tr><td colspan="2" class="section-title">Основное</td></tr>`;
+          html += row("Job ID",       job.job_id);
+          html += row("Status",       "");
+          // inject badge directly
+          const statusTd = statusBadgeHtml(job.status);
+          html = html.replace(row("Status",       ""), `<tr><td>Status</td><td>${statusTd}</td></tr>`);
+          html += row("Mode",         job.migration_mode);
+          html += row("Source table", job.table_name);
+          html += row("Target table", job.target_table_name);
+          html += row("Created at",   fmtDate(job.created_at));
+          html += row("Completed at", fmtDate(job.completed_at));
+
+          if (isCdc) {
+            html += `<tr><td colspan="2" class="section-title">CDC</td></tr>`;
+            html += row("SCN cutoff",       job.scn_cutoff);
+            html += row("Catchup target",   job.catchup_target);
+            html += row("Connector name",   job.debezium_connector_name);
+            html += row("Kafka topic",      job.kafka_topic_name);
+            html += row("Consumer group",   job.consumer_group_name);
+            html += row("CDC owner worker", job.cdc_owner_worker_id);
+            html += row("CDC started at",   fmtDate(job.cdc_started_at));
+            html += row("CDC heartbeat",    fmtDate(job.cdc_heartbeat_at));
+          }
+
+          if (job.message_key_columns && job.message_key_columns.length) {
+            html += `<tr><td colspan="2" class="section-title">Key Columns</td></tr>`;
+            html += row("Key columns", job.message_key_columns.join(", "));
+          }
+
+          html += `</table>`;
+          return html;
+        }
+
+        async function openJobDetailsPanel(jobId, sourceTable) {
+          openPanel(sourceTable, '<div class="loading">Загрузка…</div>');
+          try {
+            const [job, chunksData] = await Promise.all([
+              fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId)),
+              fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks").catch(function () { return null; }),
+            ]);
+            let html = renderJobDetails(job);
+            if (chunksData) {
+              html += renderChunksSection(chunksData);
+            }
+            html += `<button class="btn-danger" id="btn-delete-job" data-job-id="${escHtml(jobId)}">Удалить job</button>`;
+            html += `<div id="delete-warn" class="warn-box" style="display:none"></div>`;
+            panelBody.innerHTML = html;
+            bindDeleteJobButton();
+          } catch (err) {
+            panelBody.innerHTML = `<div class="error">Не удалось загрузить job: ${escHtml(String(err.message || err))}</div>`;
+          }
+        }
+
+        function bindDeleteJobButton() {
+          const btn = document.getElementById("btn-delete-job");
+          if (!btn) return;
+          btn.addEventListener("click", async function () {
+            const jobId = btn.dataset.jobId;
+            if (!confirm("Удалить job " + jobId + "?\n\nЭто действие необратимо.")) return;
+            btn.disabled = true;
+            btn.textContent = "Удаляем…";
+            const warnEl = document.getElementById("delete-warn");
+            try {
+              const resp = await fetch("/api/v1/jobs/" + encodeURIComponent(jobId), { method: "DELETE" });
+              const data = await resp.json().catch(function () { return {}; });
+              if (!resp.ok) {
+                throw new Error(data.message || data.error || "HTTP " + resp.status);
+              }
+              if (data.debezium_warning) {
+                warnEl.textContent = "⚠ " + data.debezium_warning;
+                warnEl.style.display = "block";
+                btn.textContent = "Job удалён (см. предупреждение выше)";
+                setTimeout(function () { closePanel(); location.reload(); }, 5000);
+              } else {
+                closePanel();
+                location.reload();
+              }
+            } catch (err) {
+              btn.disabled = false;
+              btn.textContent = "Удалить job";
+              warnEl.textContent = "Ошибка: " + String(err.message || err);
+              warnEl.style.display = "block";
+            }
+          });
+        }
+
+        /* ─── Row click handler ─── */
+        document.querySelector("tbody").addEventListener("click", function (e) {
+          const tr = e.target.closest("tr[data-source-table]");
+          if (!tr) return;
+
+          const sourceTable = tr.dataset.sourceTable;
+          const status      = tr.dataset.status;
+          const jobId       = tr.dataset.jobId;
+
+          if (status === NOT_MIGRATED || !jobId || jobId === "—") {
+            // Open create-job form
+            openPanel("Создать Job — " + sourceTable, renderCreateJobForm(sourceTable));
+            bindCreateJobForm(sourceTable);
+          } else {
+            // Open job details
+            openJobDetailsPanel(jobId, sourceTable);
+          }
+        });
+
+        /* ─── Utilities ─── */
+        function escHtml(str) {
+          return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function fmtDate(val) {
+          if (!val) return null;
+          try { return new Date(val).toLocaleString("ru-RU"); } catch { return String(val); }
+        }
+
+        function formatSpeed(rps) {
+          if (!rps && rps !== 0) return "—";
+          if (rps >= 1000) return (rps / 1000).toFixed(1) + "k rows/s";
+          return rps.toFixed(0) + " rows/s";
+        }
+
+        /* ─── Chunk badge ─── */
+        function chunkBadgeHtml(status) {
+          let cls = "badge-other";
+          if (status === "completed")            cls = "badge-done";
+          else if (status === "pending")         cls = "badge-none";
+          else if (status === "running")         cls = "badge-running";
+          else if (status === "failed" || status === "error") cls = "badge-error";
+          return `<span class="badge ${cls}">${escHtml(status || "—")}</span>`;
+        }
+
+        /* ─── Chunks table renderer ─── */
+        function renderChunksSection(chunksData) {
+          const stats  = chunksData.stats  || {};
+          const chunks = chunksData.chunks || [];
+
+          let html = `<div class="section-title">Чанки</div>`;
+
+          if (chunks.length === 0) {
+            html += `<p class="muted" style="font-size:13px;">Чанки не созданы</p>`;
+            return html;
+          }
+
+          const by = stats.by_status || {};
+          const done    = by.completed || 0;
+          const running = by.running   || 0;
+          const failed  = by.failed    || by.error || 0;
+          const total   = stats.total  || chunks.length;
+          const rows    = (stats.rows_processed || 0).toLocaleString("ru-RU");
+          const speed   = stats.avg_rows_per_second != null ? formatSpeed(stats.avg_rows_per_second) : "—";
+
+          html += `<div class="chunks-summary">
+            <span>Всего: <strong>${total}</strong></span>
+            <span>Выполнено: <strong>${done}</strong></span>
+            <span>Выполняется: <strong>${running}</strong></span>
+            ${failed ? `<span style="color:#991b1b">Ошибки: <strong>${failed}</strong></span>` : ""}
+            <span>Строк: <strong>${rows}</strong></span>
+            <span>Ср. скорость: <strong>${speed}</strong></span>
+          </div>`;
+
+          html += `<div class="chunks-wrap"><table class="chunks-table">
+            <thead><tr>
+              <th>#</th>
+              <th>Статус</th>
+              <th>Воркер</th>
+              <th>Строк</th>
+              <th>Скорость</th>
+              <th>Завершение</th>
+            </tr></thead><tbody>`;
+
+          chunks.forEach(function (c, i) {
+            const worker = c.assigned_worker_id
+              ? escHtml(String(c.assigned_worker_id).slice(-12))
+              : '<span class="muted">—</span>';
+            const spd = c.rows_per_second != null ? formatSpeed(c.rows_per_second) : "—";
+            const fin = c.completed_at ? escHtml(fmtDate(c.completed_at) || "—") : "—";
+            html += `<tr>
+              <td class="muted">${i + 1}</td>
+              <td>${chunkBadgeHtml(c.status)}</td>
+              <td class="muted" style="font-size:11px;">${worker}</td>
+              <td>${(c.rows_processed || 0).toLocaleString("ru-RU")}</td>
+              <td>${spd}</td>
+              <td class="muted" style="font-size:11px;">${fin}</td>
+            </tr>`;
+            if (c.error_message) {
+              html += `<tr><td colspan="6" style="color:#991b1b;font-size:11px;padding:2px 8px 6px;">${escHtml(c.error_message)}</td></tr>`;
+            }
+          });
+
+          html += `</tbody></table></div>`;
+          return html;
+        }
+
+        /* ─── Chunk stats in jobs list ─── */
+        async function loadAllChunkStats() {
+          const rows = document.querySelectorAll("tbody tr[data-job-id]");
+          const promises = [];
+          rows.forEach(function (tr) {
+            const jobId = tr.dataset.jobId;
+            if (!jobId || jobId === "—") return;
+            const cell = document.getElementById("progress-" + jobId);
+            if (!cell) return;
+            promises.push(
+              fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks")
+                .then(function (data) {
+                  const stats = data.stats || {};
+                  const total = stats.total || 0;
+                  if (total === 0) { cell.innerHTML = '<span class="muted">—</span>'; return; }
+                  const done = (stats.by_status || {}).completed || 0;
+                  const spd  = stats.avg_rows_per_second;
+                  cell.innerHTML = `<strong>${done}</strong> / ${total} чанков`
+                    + (spd != null ? `<span class="speed">${formatSpeed(spd)}</span>` : "");
+                })
+                .catch(function () { cell.innerHTML = '<span class="muted">—</span>'; })
+            );
+          });
+          await Promise.all(promises);
+        }
+
+        loadAllChunkStats();
+      })();
+    </script>
+  </body>
+</html>
