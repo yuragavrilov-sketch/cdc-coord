@@ -464,11 +464,13 @@ class CoordinatorService:
         #   migration.TCBPAY.MERC_CONFIG          (non-CDB / PDB mode)
         #   migration.ORCLCDB.TCBPAY.MERC_CONFIG  (CDB mode)
         # Each connector captures exactly one table, so ".*" at the start is safe.
+        # Debezium normalizes '#' in Oracle table names to '_' in emitted topic table tokens.
+        normalized_topic_table = source_table_only.replace("#", "_")
         default_topic_regex = (
             ".*\\."
             + re.escape(source_schema)
             + "\\."
-            + re.escape(source_table_only)
+            + re.escape(normalized_topic_table)
             + "$"
         )
         cfg_updates: dict[str, Any] = {
