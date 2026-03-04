@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,32 @@ class MonitoringService:
                 }
             )
         return results
+
+    def start_background_loop(self, interval_seconds: int = 30) -> threading.Thread:
+        """Start a daemon thread that calls run_once() every interval_seconds."""
+        stop_event = threading.Event()
+
+        def _loop() -> None:
+            logger.info("Monitoring loop started", extra={"interval_seconds": interval_seconds})
+            while not stop_event.wait(interval_seconds):
+                try:
+                    result = self.run_once()
+                    if result.bulk_transitions:
+                        logger.info("Bulk transitions", extra={"transitions": result.bulk_transitions})
+                    if result.released_owners:
+                        logger.info("Released stale CDC owners", extra={"job_ids": result.released_owners})
+                    stale = self._repository.reclaim_stale_chunks(
+                        self._config.worker_chunk_timeout_seconds
+                    )
+                    if stale:
+                        logger.info("Reclaimed stale chunks", extra={"count": stale})
+                except Exception:
+                    logger.exception("Monitoring loop error")
+
+        thread = threading.Thread(target=_loop, daemon=True, name="monitoring-loop")
+        thread._stop_event = stop_event  # type: ignore[attr-defined]
+        thread.start()
+        return thread
 
     def _check_connectors(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []

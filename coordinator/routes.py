@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
@@ -19,6 +20,28 @@ from .status_checks import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _wall_clock_rows_per_second(completed_chunks: list[dict], total_rows: int) -> float | None:
+    """
+    Calculate aggregate throughput using wall-clock time:
+    min(assigned_at) → max(completed_at) across all completed chunks.
+
+    This correctly accounts for parallel workers, unlike summing individual
+    chunk durations (which gives per-worker average, not system throughput).
+    """
+    if not completed_chunks or total_rows == 0:
+        return None
+    starts = [c["assigned_at"] for c in completed_chunks if c.get("assigned_at")]
+    ends = [c["completed_at"] for c in completed_chunks if c.get("completed_at")]
+    if not starts or not ends:
+        return None
+    t_start = min(datetime.fromisoformat(t) for t in starts)
+    t_end = max(datetime.fromisoformat(t) for t in ends)
+    wall_elapsed = (t_end - t_start).total_seconds()
+    if wall_elapsed <= 0:
+        return None
+    return round(total_rows / wall_elapsed, 1)
 
 
 def build_api_blueprint(
@@ -91,10 +114,9 @@ def build_api_blueprint(
         for c in chunks:
             by_status[c["status"]] = by_status.get(c["status"], 0) + 1
 
-        completed = [c for c in chunks if c["status"] == "completed" and c.get("elapsed_seconds")]
-        total_elapsed = sum(float(c["elapsed_seconds"]) for c in completed)
+        completed = [c for c in chunks if c["status"] == "completed"]
         total_rows_completed = sum(c["rows_processed"] for c in completed)
-        avg_speed = round(total_rows_completed / total_elapsed, 1) if total_elapsed > 0 else None
+        avg_speed = _wall_clock_rows_per_second(completed, total_rows_completed)
 
         return jsonify({
             "chunks": chunks,

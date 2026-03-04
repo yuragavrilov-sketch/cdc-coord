@@ -28,6 +28,8 @@ def create_app(config: AppConfig | None = None) -> Flask:
     except Exception:
         app.logger.exception("Failed to ensure schema on startup; continuing in degraded mode")
 
+    monitoring.start_background_loop(interval_seconds=30)
+
     app.register_blueprint(build_ui_blueprint(app_config, repository))
     app.register_blueprint(build_api_blueprint(service, monitoring, app_config, repository), url_prefix="/api/v1")
     app.register_blueprint(build_legacy_api_blueprint(service, app_config, repository), url_prefix="/api")
