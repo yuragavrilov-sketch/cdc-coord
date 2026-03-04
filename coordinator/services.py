@@ -306,13 +306,14 @@ class CoordinatorService:
         key_columns: list[str],
         metadata: OracleTableMetadata,
     ) -> dict[str, Any]:
-        topic_prefix = self._config.topic_prefix
-        # Java regex matching the default Debezium topic for this table so the
-        # route transform can redirect it to our job-specific topic_name.
+        # Java regex for ByLogicalTableRouter.
+        # We anchor only the SUFFIX (.SCHEMA.TABLE$) because in CDB mode Debezium
+        # inserts the container/PDB name into the topic, e.g.:
+        #   migration.TCBPAY.MERC_CONFIG          (non-CDB / PDB mode)
+        #   migration.ORCLCDB.TCBPAY.MERC_CONFIG  (CDB mode)
+        # Each connector captures exactly one table, so ".*" at the start is safe.
         default_topic_regex = (
-            "^"
-            + re.escape(topic_prefix)
-            + "\\."
+            ".*\\."
             + re.escape(source_schema)
             + "\\."
             + re.escape(source_table_only)
