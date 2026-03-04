@@ -4,7 +4,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import AppConfig, normalize_oracle_identifier
 from .debezium import DebeziumClient
@@ -13,6 +13,9 @@ from .models import JobRecord, OracleTableMetadata
 from .oracle import OracleClientConfig, OracleIntrospector
 from .repositories import CoordinatorRepository
 from .sql_templates import build_sql_templates
+
+if TYPE_CHECKING:
+    from .notifications import VKTeamsNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +69,15 @@ class CreateJobRequest:
 
 
 class CoordinatorService:
-    def __init__(self, config: AppConfig, repository: CoordinatorRepository) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        repository: CoordinatorRepository,
+        notifier: VKTeamsNotifier | None = None,
+    ) -> None:
         self._config = config
         self._repository = repository
+        self._notifier = notifier
         self._debezium = DebeziumClient(config.debezium_connect_url)
         source_cfg = (
             OracleClientConfig(
@@ -280,7 +289,15 @@ class CoordinatorService:
 
         chunks = self._oracle.build_rowid_chunks(source_table, chunk_size)
         self._repository.save_chunks(job.job_id, source_table, chunks)
-        return self._repository.update_job_status(job.job_id, "bulk_running")
+        result = self._repository.update_job_status(job.job_id, "bulk_running")
+        if self._notifier:
+            self._notifier.notify_job_added(
+                table_name=source_table,
+                mode="cdc",
+                chunk_count=len(chunks),
+                job_id=result.job_id,
+            )
+        return result
 
     def _create_hybrid_job(
         self,
@@ -361,6 +378,7 @@ class CoordinatorService:
         self._repository.save_chunks(parent_job.job_id, source_table, recent_chunks)
         parent_job = self._repository.update_job_status(parent_job.job_id, "bulk_running")
 
+        child_job_id: str | None = None
         if historical_chunks:
             child_job = self._repository.create_job(
                 job_id=None,
@@ -387,6 +405,7 @@ class CoordinatorService:
             )
             self._repository.save_sql_templates(child_sql_templates)
             self._repository.save_chunks(child_job.job_id, source_table, historical_chunks)
+            child_job_id = child_job.job_id
             logger.info(
                 "Hybrid job created: %d recent chunks (CDC parent) + %d historical chunks (static child)",
                 len(recent_chunks), len(historical_chunks),
@@ -397,6 +416,16 @@ class CoordinatorService:
                 "Hybrid job created: table fits in recent window, no static child needed (%d chunks)",
                 len(recent_chunks),
                 extra={"parent_job_id": parent_job.job_id},
+            )
+
+        if self._notifier:
+            total_chunks = len(recent_chunks) + len(historical_chunks)
+            self._notifier.notify_job_added(
+                table_name=source_table,
+                mode="hybrid",
+                chunk_count=total_chunks,
+                job_id=parent_job.job_id,
+                child_job_id=child_job_id,
             )
 
         return parent_job
@@ -437,7 +466,15 @@ class CoordinatorService:
 
         chunks = self._oracle.build_rowid_chunks(source_table, chunk_size)
         self._repository.save_chunks(job.job_id, source_table, chunks)
-        return self._repository.update_job_status(job.job_id, "bulk_running")
+        result = self._repository.update_job_status(job.job_id, "bulk_running")
+        if self._notifier:
+            self._notifier.notify_job_added(
+                table_name=source_table,
+                mode="static",
+                chunk_count=len(chunks),
+                job_id=result.job_id,
+            )
+        return result
 
     def _build_runtime_names(self, source_schema: str, source_table: str, job_id: str) -> tuple[str, str, str]:
         source_token = _runtime_table_token(source_schema, source_table)

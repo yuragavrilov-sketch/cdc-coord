@@ -95,6 +95,11 @@ class AppConfig:
     # CDC worker (multi-table)
     cdc_worker_job_limit: int = 20
     cdc_worker_refresh_interval_seconds: int = 10
+    # VK Teams notifications
+    vkteams_bot_token: str | None = None
+    vkteams_chat_id: str | None = None
+    vkteams_api_url: str = "https://myteam.mail.ru/bot/v1"
+    vkteams_status_interval_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -189,6 +194,10 @@ class AppConfig:
             hybrid_recent_rows=int(os.getenv("HYBRID_RECENT_ROWS", "2000000")),
             cdc_worker_job_limit=int(os.getenv("CDC_WORKER_JOB_LIMIT", "20")),
             cdc_worker_refresh_interval_seconds=int(os.getenv("CDC_WORKER_REFRESH_INTERVAL_SECONDS", "10")),
+            vkteams_bot_token=os.getenv("VKTEAMS_BOT_TOKEN") or None,
+            vkteams_chat_id=os.getenv("VKTEAMS_CHAT_ID") or None,
+            vkteams_api_url=os.getenv("VKTEAMS_API_URL", "https://myteam.mail.ru/bot/v1"),
+            vkteams_status_interval_seconds=int(os.getenv("VKTEAMS_STATUS_INTERVAL_SECONDS", "300")),
         )
 
     def validate(self) -> None:

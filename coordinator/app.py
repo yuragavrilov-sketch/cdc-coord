@@ -1,3 +1,5 @@
+import logging
+
 from flask import Flask
 
 from .config import AppConfig
@@ -10,6 +12,24 @@ from .routes import build_api_blueprint, build_legacy_api_blueprint
 from .services import CoordinatorService
 from .ui import build_ui_blueprint
 
+_app_logger = logging.getLogger(__name__)
+
+
+def _build_notifier(app_config: AppConfig):
+    """Return a VKTeamsNotifier if configured, else None."""
+    if app_config.vkteams_bot_token and app_config.vkteams_chat_id:
+        from .notifications import VKTeamsNotifier
+        _app_logger.info(
+            "VK Teams notifications enabled",
+            extra={"chat_id": app_config.vkteams_chat_id, "api_url": app_config.vkteams_api_url},
+        )
+        return VKTeamsNotifier(
+            token=app_config.vkteams_bot_token,
+            chat_id=app_config.vkteams_chat_id,
+            api_url=app_config.vkteams_api_url,
+        )
+    return None
+
 
 def create_app(config: AppConfig | None = None) -> Flask:
     app_config = config or AppConfig.from_env()
@@ -20,8 +40,9 @@ def create_app(config: AppConfig | None = None) -> Flask:
 
     database = Database(app_config.postgres_dsn)
     repository = CoordinatorRepository(database)
-    service = CoordinatorService(app_config, repository)
-    monitoring = MonitoringService(app_config, repository)
+    notifier = _build_notifier(app_config)
+    service = CoordinatorService(app_config, repository, notifier=notifier)
+    monitoring = MonitoringService(app_config, repository, notifier=notifier)
 
     try:
         repository.ensure_schema()

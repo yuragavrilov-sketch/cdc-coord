@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(xargs grep -l \"MigrationWorker\\\\|worker_id\\\\|CDCWorker\\\\|BulkWorker\")"
+      "Bash(xargs grep -l \"MigrationWorker\\\\|worker_id\\\\|CDCWorker\\\\|BulkWorker\")",
+      "Bash(grep -n \"bulk_running\\\\|bulk_done\\\\|bulk_loading\\\\|cdc_accumulating\\\\|cdc_catchup\\\\|cdc_streaming\\\\|completed\" coordinator/*.py)"
     ]
   }
 }

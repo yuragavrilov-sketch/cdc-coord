@@ -193,6 +193,7 @@ def build_api_blueprint(
                     "bulk_transitions": result.bulk_transitions,
                     "connectors": result.connectors,
                     "released_owners": result.released_owners,
+                    "stale_chunks_reclaimed": result.stale_chunks_reclaimed,
                 }
             ),
             200,

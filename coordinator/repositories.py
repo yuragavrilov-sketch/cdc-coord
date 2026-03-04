@@ -422,7 +422,11 @@ class CoordinatorRepository:
                 rows = cur.fetchall()
         return [self._to_job(row) for row in rows]
 
-    def release_stale_cdc_ownership(self, heartbeat_timeout_seconds: int) -> list[str]:
+    def release_stale_cdc_ownership(self, heartbeat_timeout_seconds: int) -> list[dict[str, Any]]:
+        """Reset stale CDC ownership.
+
+        Returns list of dicts: {job_id, table_name} for each released job.
+        """
         cutoff = datetime.now(tz=UTC) - timedelta(seconds=heartbeat_timeout_seconds)
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -440,12 +444,12 @@ class CoordinatorRepository:
                       AND cdc_owner_worker_id IS NOT NULL
                       AND cdc_heartbeat_at IS NOT NULL
                       AND cdc_heartbeat_at < %s
-                    RETURNING job_id
+                    RETURNING job_id, table_name
                     """,
                     (cutoff,),
                 )
                 rows = cur.fetchall()
-        return [str(row["job_id"]) for row in rows]
+        return [{"job_id": str(row["job_id"]), "table_name": row["table_name"]} for row in rows]
 
     def _to_job(self, row: dict[str, Any]) -> JobRecord:
         raw_config = row.get("config") or {}
@@ -487,15 +491,11 @@ class CoordinatorRepository:
     def _claim_bulk_chunk_sql(max_per_job: int = 0) -> str:
         # Round-robin across jobs: prefer the job with fewest currently running chunks so that
         # slow jobs (e.g. LOB tables) don't starve all workers from faster tables.
-        # max_per_job > 0 adds an advisory cap: skip any job that already has that many running
-        # chunks.  Advisory because under READ COMMITTED concurrent claims may not see each
-        # other's in-flight transactions, but it is accurate enough for scheduling purposes.
-        cap_clause = (
-            f"AND (SELECT COUNT(*) FROM migration_system.migration_chunks c2"
-            f"      WHERE c2.job_id = c.job_id AND c2.status = 'running') < {int(max_per_job)}"
-            if max_per_job > 0
-            else ""
-        )
+        # Running counts are computed once via a non-correlated GROUP BY subquery (rc), not as
+        # correlated per-row subqueries — correlated subqueries cause lock-ordering deadlocks
+        # when multiple workers execute concurrent SKIP LOCKED updates on the same table.
+        # max_per_job > 0 adds an advisory cap (approximate under READ COMMITTED MVCC).
+        cap_clause = f"AND COALESCE(rc.cnt, 0) < {int(max_per_job)}" if max_per_job > 0 else ""
         return f"""
                     UPDATE migration_system.migration_chunks
                     SET status = 'running',
@@ -505,13 +505,18 @@ class CoordinatorRepository:
                         SELECT c.chunk_id
                         FROM migration_system.migration_chunks c
                         JOIN migration_system.migration_jobs j ON c.job_id = j.job_id
+                        LEFT JOIN (
+                            SELECT job_id, COUNT(*) AS cnt
+                            FROM migration_system.migration_chunks
+                            WHERE status = 'running'
+                            GROUP BY job_id
+                        ) rc ON rc.job_id = c.job_id
                         WHERE c.status = 'pending'
                           AND j.status IN ('bulk_running', 'bulk_loading')
                           {cap_clause}
                         ORDER BY
                           CASE WHEN j.migration_mode = 'cdc' THEN 0 ELSE 1 END,
-                          (SELECT COUNT(*) FROM migration_system.migration_chunks c2
-                           WHERE c2.job_id = c.job_id AND c2.status = 'running') ASC,
+                          COALESCE(rc.cnt, 0) ASC,
                           c.chunk_id
                         LIMIT 1
                         FOR UPDATE OF c SKIP LOCKED
@@ -620,6 +625,99 @@ class CoordinatorRepository:
                     (worker_id,),
                 )
 
+    def get_active_jobs_summary(self) -> list[dict[str, Any]]:
+        """Return all non-completed jobs with aggregate chunk progress.
+
+        Used by the VK Teams status report and error detection in monitoring.
+        Each row has: job_id, table_name, mode, status, parent_job_id,
+                      chunks_total, chunks_done, chunks_failed.
+        """
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        j.job_id,
+                        j.table_name,
+                        j.migration_mode,
+                        j.status,
+                        j.parent_job_id,
+                        COALESCE(c.total, 0)  AS chunks_total,
+                        COALESCE(c.done, 0)   AS chunks_done,
+                        COALESCE(c.failed, 0) AS chunks_failed
+                    FROM migration_system.migration_jobs j
+                    LEFT JOIN (
+                        SELECT
+                            job_id,
+                            COUNT(*)                                        AS total,
+                            COUNT(*) FILTER (WHERE status = 'completed')    AS done,
+                            COUNT(*) FILTER (WHERE status = 'failed')       AS failed
+                        FROM migration_system.migration_chunks
+                        GROUP BY job_id
+                    ) c ON c.job_id = j.job_id
+                    WHERE j.status NOT IN ('completed')
+                    ORDER BY j.created_at
+                    """
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "job_id": str(row["job_id"]),
+                "table_name": row["table_name"],
+                "mode": row["migration_mode"],
+                "status": row["status"],
+                "parent_job_id": str(row["parent_job_id"]) if row.get("parent_job_id") else None,
+                "chunks_total": int(row["chunks_total"]),
+                "chunks_done": int(row["chunks_done"]),
+                "chunks_failed": int(row["chunks_failed"]),
+            }
+            for row in rows
+        ]
+
+    def get_job_completion_stats(self, job_id: str) -> dict[str, Any]:
+        """Return total rows transferred and wall-clock duration for a completed job."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        j.table_name,
+                        j.migration_mode,
+                        j.created_at,
+                        j.completed_at,
+                        COALESCE(SUM(c.rows_processed), 0) AS total_rows,
+                        EXTRACT(EPOCH FROM (j.completed_at - j.created_at)) AS duration_seconds
+                    FROM migration_system.migration_jobs j
+                    LEFT JOIN migration_system.migration_chunks c ON c.job_id = j.job_id
+                    WHERE j.job_id = %s
+                    GROUP BY j.job_id, j.table_name, j.migration_mode, j.created_at, j.completed_at
+                    """,
+                    (job_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return {}
+        return {
+            "total_rows": int(row["total_rows"]),
+            "duration_seconds": float(row["duration_seconds"]) if row.get("duration_seconds") else None,
+        }
+
+    def get_failed_chunk_errors(self, job_id: str) -> list[str]:
+        """Return up to 3 distinct error messages from failed chunks for a job."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT error_message
+                    FROM migration_system.migration_chunks
+                    WHERE job_id = %s AND status = 'failed' AND error_message IS NOT NULL
+                    LIMIT 3
+                    """,
+                    (job_id,),
+                )
+                rows = cur.fetchall()
+        return [row["error_message"] for row in rows]
+
     def list_child_jobs(self, parent_job_id: str) -> list[JobRecord]:
         """Return all jobs whose parent_job_id matches (e.g. hybrid static children)."""
         with self._db.connection() as conn:
@@ -715,23 +813,36 @@ class CoordinatorRepository:
                         (consumer_group, topic, partition, offset),
                     )
 
-    def reclaim_stale_chunks(self, timeout_seconds: int) -> int:
-        """Reset running chunks stuck longer than timeout back to pending."""
+    def reclaim_stale_chunks(self, timeout_seconds: int) -> list[dict[str, Any]]:
+        """Reset running chunks stuck longer than timeout back to pending.
+
+        Returns list of dicts: {job_id, table_name, count} per affected job.
+        """
         with self._db.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE migration_system.migration_chunks
+                    UPDATE migration_system.migration_chunks c
                     SET status = 'pending',
                         assigned_worker_id = NULL,
                         assigned_at = NULL,
                         error_message = 'Reclaimed after timeout'
-                    WHERE status = 'running'
-                      AND assigned_at < NOW() - (%s * INTERVAL '1 second')
+                    FROM migration_system.migration_jobs j
+                    WHERE c.job_id = j.job_id
+                      AND c.status = 'running'
+                      AND c.assigned_at < NOW() - (%s * INTERVAL '1 second')
+                    RETURNING c.job_id, j.table_name
                     """,
                     (timeout_seconds,),
                 )
-                return cur.rowcount
+                rows = cur.fetchall()
+        counts: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            jid = str(row["job_id"])
+            if jid not in counts:
+                counts[jid] = {"job_id": jid, "table_name": row["table_name"], "count": 0}
+            counts[jid]["count"] += 1
+        return list(counts.values())
 
     def upsert_migration_table(self, table_name: str) -> None:
         """Register a source table in migration_tables (idempotent)."""
