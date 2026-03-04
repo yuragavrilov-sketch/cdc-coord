@@ -44,7 +44,14 @@ def _resolve_table_identifier(table_name: str, default_schema: str | None) -> tu
 
 
 def _runtime_table_token(schema: str, table: str) -> str:
-    return f"{schema}_{table}"
+    """Build a safe token for use in Kafka topic names and connector names.
+
+    Kafka topic names allow only [a-zA-Z0-9._-].  Characters outside that set
+    (e.g. '#', '$', '@', spaces) are replaced with underscores so that Oracle
+    table names such as 'SCHEMA.TABLE#1' don't break connector/topic creation.
+    """
+    raw = f"{schema}_{table}"
+    return re.sub(r"[^a-zA-Z0-9._\-]", "_", raw)
 
 
 @dataclass(slots=True)
