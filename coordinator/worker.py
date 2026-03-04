@@ -268,18 +268,16 @@ class CDCConsumer:
         logger.info("CDC consumer created", extra={"job_id": job.job_id, "topic": topic})
 
         try:
-            tp = TopicPartition(topic, 0)
-            consumer.assign([tp])
-
-            # Resume from saved offset or seek to beginning
             saved = self._repository.get_kafka_offsets(group_id, topic)
             if saved and 0 in saved:
                 resume_offset = saved[0] + 1
-                consumer.seek(TopicPartition(topic, 0, resume_offset))
                 logger.info("CDC resuming", extra={"job_id": job.job_id, "offset": resume_offset})
             else:
-                consumer.seek(TopicPartition(topic, 0, 0))
+                resume_offset = 0
                 logger.info("CDC starting from beginning", extra={"job_id": job.job_id})
+
+            tp = TopicPartition(topic, 0, resume_offset)
+            consumer.assign([tp])
 
             # Determine catchup target (end offset at CDC start time)
             catchup_target = job.catchup_target
