@@ -138,6 +138,83 @@ def _build_cdc_delete_sql(table_name: str, pk_columns: list[str]) -> str:
     return f"DELETE FROM {qualified} WHERE {conditions}"
 
 
+def _resolve_oracledb_lob_type() -> type[Any] | None:
+    try:
+        import oracledb
+    except ImportError:
+        return None
+    return getattr(oracledb, "LOB", None)
+
+
+def _detect_lob_column_type_codes(description: Any) -> dict[int, Any]:
+    """Return {column_index: db_type_code} for CLOB/BLOB/NCLOB columns."""
+    if not description:
+        return {}
+    try:
+        import oracledb
+    except ImportError:
+        return {}
+
+    lob_types = {
+        oracledb.DB_TYPE_CLOB,
+        oracledb.DB_TYPE_BLOB,
+        oracledb.DB_TYPE_NCLOB,
+    }
+    lob_columns: dict[int, Any] = {}
+    for idx, col in enumerate(description):
+        type_code = getattr(col, "type_code", None)
+        if type_code is None and isinstance(col, (tuple, list)) and len(col) > 1:
+            type_code = col[1]
+        if type_code in lob_types:
+            lob_columns[idx] = type_code
+    return lob_columns
+
+
+def _apply_lob_input_sizes(cursor: Any, column_count: int, lob_type_codes: dict[int, Any]) -> None:
+    """Set bind sizes for positional executemany() LOB columns when known."""
+    if not lob_type_codes:
+        return
+    input_sizes: list[Any] = [None] * column_count
+    for idx, type_code in lob_type_codes.items():
+        if 0 <= idx < column_count:
+            input_sizes[idx] = type_code
+    if any(size is not None for size in input_sizes):
+        cursor.setinputsizes(*input_sizes)
+
+
+def _materialize_lob_batch(
+    rows: list[Any],
+    lob_indexes: tuple[int, ...],
+    lob_python_type: type[Any] | None,
+) -> list[Any]:
+    """Convert source-session LOB locators into plain str/bytes values via read()."""
+    if not rows or lob_python_type is None:
+        return rows
+
+    materialized_rows: list[Any] = []
+    changed_any = False
+    for row in rows:
+        values = list(row)
+        row_changed = False
+        indexes = lob_indexes if lob_indexes else tuple(range(len(values)))
+        for idx in indexes:
+            if idx >= len(values):
+                continue
+            value = values[idx]
+            if value is None:
+                continue
+            if isinstance(value, lob_python_type):
+                values[idx] = value.read()
+                row_changed = True
+        if row_changed:
+            changed_any = True
+            materialized_rows.append(tuple(values) if isinstance(row, tuple) else values)
+        else:
+            materialized_rows.append(row)
+
+    return materialized_rows if changed_any else rows
+
+
 # ---------------------------------------------------------------------------
 # Oracle index management helpers
 # ---------------------------------------------------------------------------
@@ -244,12 +321,16 @@ class BulkChunkProcessor:
                     src_cur.prefetchrows = batch_size
                     t0 = time.monotonic()
                     src_cur.execute(select_sql, select_params)
+                    lob_type_codes = _detect_lob_column_type_codes(src_cur.description)
+                    lob_indexes = tuple(lob_type_codes.keys())
+                    lob_python_type = _resolve_oracledb_lob_type()
                     logger.info(
                         "Bulk SELECT executed: elapsed_ms=%d",
                         round((time.monotonic() - t0) * 1000),
                         extra={"chunk_id": chunk_id_str},
                     )
                     with tgt_conn.cursor() as tgt_cur:
+                        _apply_lob_input_sizes(tgt_cur, len(insertable_cols), lob_type_codes)
                         batch_no = 0
                         while True:
                             t_fetch = time.monotonic()
@@ -257,17 +338,18 @@ class BulkChunkProcessor:
                             fetch_ms = round((time.monotonic() - t_fetch) * 1000)
                             if not rows:
                                 break
+                            rows_to_insert = _materialize_lob_batch(rows, lob_indexes, lob_python_type)
                             batch_no += 1
                             t_insert = time.monotonic()
-                            tgt_cur.executemany(insert_sql, rows, batcherrors=True)
+                            tgt_cur.executemany(insert_sql, rows_to_insert, batcherrors=True)
                             insert_ms = round((time.monotonic() - t_insert) * 1000)
                             t_commit = time.monotonic()
                             tgt_conn.commit()
                             commit_ms = round((time.monotonic() - t_commit) * 1000)
-                            rows_processed += len(rows)
+                            rows_processed += len(rows_to_insert)
                             logger.info(
                                 "Bulk batch applied: batch=%d rows=%d total=%d fetch_ms=%d insert_ms=%d commit_ms=%d",
-                                batch_no, len(rows), rows_processed, fetch_ms, insert_ms, commit_ms,
+                                batch_no, len(rows_to_insert), rows_processed, fetch_ms, insert_ms, commit_ms,
                                 extra={"chunk_id": chunk_id_str},
                             )
 
