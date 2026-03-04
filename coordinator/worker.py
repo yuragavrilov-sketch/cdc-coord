@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 from .config import AppConfig
-from .errors import ExternalServiceError, ValidationError
+from .errors import ExternalServiceError, NotFoundError, ValidationError
 from .models import JobRecord
 from .repositories import CoordinatorRepository
 
@@ -293,8 +293,12 @@ class CDCConsumer:
             tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
                 while not self._shutdown_event.is_set():
-                    # Periodically check if job was externally completed/cancelled
-                    current_job = self._repository.get_job(job.job_id)
+                    # Periodically check if job was externally completed/cancelled/deleted
+                    try:
+                        current_job = self._repository.get_job(job.job_id)
+                    except NotFoundError:
+                        logger.info("Job deleted externally, stopping CDC", extra={"job_id": job.job_id})
+                        break
                     if current_job.status == "completed":
                         logger.info("Job completed externally, stopping CDC", extra={"job_id": job.job_id})
                         break
