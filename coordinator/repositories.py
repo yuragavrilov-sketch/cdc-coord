@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from psycopg.types.json import Json
 
 from .db import Database
@@ -35,93 +36,96 @@ class CoordinatorRepository:
         return True
 
     def ensure_schema(self) -> None:
-        with self._db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("CREATE SCHEMA IF NOT EXISTS migration_system")
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS migration_system.migration_jobs (
-                        job_id UUID PRIMARY KEY,
-                        table_name VARCHAR(200) NOT NULL,
-                        target_table_name VARCHAR(200),
-                        migration_mode VARCHAR(20) NOT NULL,
-                        message_key_columns JSONB,
-                        scn_cutoff BIGINT,
-                        catchup_target BIGINT,
-                        debezium_connector_name VARCHAR(200),
-                        kafka_topic_name VARCHAR(200),
-                        consumer_group_name VARCHAR(200),
-                        debezium_config JSONB,
-                        cdc_owner_worker_id VARCHAR(100),
-                        cdc_started_at TIMESTAMP,
-                        cdc_heartbeat_at TIMESTAMP,
-                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                        config JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        idempotency_key VARCHAR(200),
-                        created_at TIMESTAMP DEFAULT NOW(),
-                        completed_at TIMESTAMP
+        try:
+            with self._db.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("CREATE SCHEMA IF NOT EXISTS migration_system")
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system.migration_jobs (
+                            job_id UUID PRIMARY KEY,
+                            table_name VARCHAR(200) NOT NULL,
+                            target_table_name VARCHAR(200),
+                            migration_mode VARCHAR(20) NOT NULL,
+                            message_key_columns JSONB,
+                            scn_cutoff BIGINT,
+                            catchup_target BIGINT,
+                            debezium_connector_name VARCHAR(200),
+                            kafka_topic_name VARCHAR(200),
+                            consumer_group_name VARCHAR(200),
+                            debezium_config JSONB,
+                            cdc_owner_worker_id VARCHAR(100),
+                            cdc_started_at TIMESTAMP,
+                            cdc_heartbeat_at TIMESTAMP,
+                            status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                            config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            idempotency_key VARCHAR(200),
+                            created_at TIMESTAMP DEFAULT NOW(),
+                            completed_at TIMESTAMP
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_jobs_mode_status ON migration_system.migration_jobs (migration_mode, status)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_jobs_connector ON migration_system.migration_jobs (debezium_connector_name) WHERE debezium_connector_name IS NOT NULL"
-                )
-                cur.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency ON migration_system.migration_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL"
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS migration_system.migration_chunks (
-                        chunk_id UUID PRIMARY KEY,
-                        job_id UUID NOT NULL REFERENCES migration_system.migration_jobs(job_id),
-                        table_name VARCHAR(200) NOT NULL,
-                        start_rowid VARCHAR(100),
-                        end_rowid VARCHAR(100),
-                        assigned_worker_id VARCHAR(100),
-                        status VARCHAR(20) NOT NULL DEFAULT 'pending',
-                        rows_processed BIGINT DEFAULT 0,
-                        error_message TEXT,
-                        assigned_at TIMESTAMP,
-                        completed_at TIMESTAMP
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_jobs_mode_status ON migration_system.migration_jobs (migration_mode, status)"
                     )
-                    """
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_chunks_job_status ON migration_system.migration_chunks (job_id, status)"
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS migration_system.migration_sql_templates (
-                        job_id UUID PRIMARY KEY REFERENCES migration_system.migration_jobs(job_id),
-                        table_name VARCHAR(200) NOT NULL,
-                        pk_columns JSONB NOT NULL,
-                        all_columns JSONB NOT NULL,
-                        insertable_columns JSONB NOT NULL,
-                        bulk_merge_sql TEXT NOT NULL,
-                        bulk_insert_sql TEXT,
-                        cdc_merge_sql TEXT,
-                        cdc_delete_sql TEXT,
-                        has_lobs BOOLEAN DEFAULT FALSE,
-                        has_timestamps BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP DEFAULT NOW()
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_jobs_connector ON migration_system.migration_jobs (debezium_connector_name) WHERE debezium_connector_name IS NOT NULL"
                     )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS migration_system._migration_offsets (
-                        consumer_group VARCHAR(200) NOT NULL,
-                        topic VARCHAR(200) NOT NULL,
-                        partition INTEGER NOT NULL,
-                        "offset" BIGINT NOT NULL,
-                        updated_at TIMESTAMP DEFAULT NOW(),
-                        PRIMARY KEY (consumer_group, topic, partition)
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency ON migration_system.migration_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL"
                     )
-                    """
-                )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system.migration_chunks (
+                            chunk_id UUID PRIMARY KEY,
+                            job_id UUID NOT NULL REFERENCES migration_system.migration_jobs(job_id),
+                            table_name VARCHAR(200) NOT NULL,
+                            start_rowid VARCHAR(100),
+                            end_rowid VARCHAR(100),
+                            assigned_worker_id VARCHAR(100),
+                            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                            rows_processed BIGINT DEFAULT 0,
+                            error_message TEXT,
+                            assigned_at TIMESTAMP,
+                            completed_at TIMESTAMP
+                        )
+                        """
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_chunks_job_status ON migration_system.migration_chunks (job_id, status)"
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system.migration_sql_templates (
+                            job_id UUID PRIMARY KEY REFERENCES migration_system.migration_jobs(job_id),
+                            table_name VARCHAR(200) NOT NULL,
+                            pk_columns JSONB NOT NULL,
+                            all_columns JSONB NOT NULL,
+                            insertable_columns JSONB NOT NULL,
+                            bulk_merge_sql TEXT NOT NULL,
+                            bulk_insert_sql TEXT,
+                            cdc_merge_sql TEXT,
+                            cdc_delete_sql TEXT,
+                            has_lobs BOOLEAN DEFAULT FALSE,
+                            has_timestamps BOOLEAN DEFAULT FALSE,
+                            created_at TIMESTAMP DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system._migration_offsets (
+                            consumer_group VARCHAR(200) NOT NULL,
+                            topic VARCHAR(200) NOT NULL,
+                            partition INTEGER NOT NULL,
+                            "offset" BIGINT NOT NULL,
+                            updated_at TIMESTAMP DEFAULT NOW(),
+                            PRIMARY KEY (consumer_group, topic, partition)
+                        )
+                        """
+                    )
+        except psycopg.errors.UniqueViolation:
+            pass  # Another worker already created the schema concurrently
 
     def create_job(
         self,
