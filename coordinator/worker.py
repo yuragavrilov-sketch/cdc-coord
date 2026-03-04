@@ -88,11 +88,12 @@ def _build_source_select(
 
 def _build_bulk_insert_sql(table_name: str, columns: list[str]) -> str:
     """Plain INSERT for bulk load — use with executemany(batcherrors=True) for idempotency.
-    Positional binds (:1,:2,...) + tuple rows avoids per-row dict creation overhead."""
+    Positional binds (:1,:2,...) + tuple rows avoids per-row dict creation overhead.
+    Note: APPEND_VALUES hint is incompatible with BATCH ERROR mode (ORA-38910)."""
     qualified = _qualified_table(table_name)
     insert_cols = ", ".join(f'"{c}"' for c in columns)
     insert_vals = ", ".join(f":{i + 1}" for i in range(len(columns)))
-    return f"INSERT /*+ APPEND_VALUES */ INTO {qualified} ({insert_cols}) VALUES ({insert_vals})"
+    return f"INSERT INTO {qualified} ({insert_cols}) VALUES ({insert_vals})"
 
 
 def _build_bulk_merge_sql(table_name: str, columns: list[str], pk_columns: list[str]) -> str:
