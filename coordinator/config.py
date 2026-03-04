@@ -84,6 +84,7 @@ class AppConfig:
     oracle_target_schema: str | None = None
     kafka_bootstrap_servers: str = "localhost:9092"
     worker_bulk_batch_size: int = 1000
+    worker_bulk_lob_batch_size: int = 100
     worker_cdc_batch_size: int = 500
     worker_poll_interval_seconds: int = 5
     worker_heartbeat_interval_seconds: int = 30
@@ -178,6 +179,7 @@ class AppConfig:
             oracle_target_schema=target_schema,
             kafka_bootstrap_servers=kafka_bootstrap,
             worker_bulk_batch_size=int(os.getenv("WORKER_BULK_BATCH_SIZE", "1000")),
+            worker_bulk_lob_batch_size=int(os.getenv("WORKER_BULK_LOB_BATCH_SIZE", "100")),
             worker_cdc_batch_size=int(os.getenv("WORKER_CDC_BATCH_SIZE", "500")),
             worker_poll_interval_seconds=int(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "5")),
             worker_heartbeat_interval_seconds=int(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "30")),

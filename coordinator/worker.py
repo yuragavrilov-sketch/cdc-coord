@@ -307,6 +307,7 @@ class BulkChunkProcessor:
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
         rows_processed = 0
         batch_size = self._config.worker_bulk_batch_size
+        lob_batch_size = self._config.worker_bulk_lob_batch_size
         tgt_schema, tgt_table = target_table.split(".", 1)
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn:
@@ -324,9 +325,12 @@ class BulkChunkProcessor:
                     lob_type_codes = _detect_lob_column_type_codes(src_cur.description)
                     lob_indexes = tuple(lob_type_codes.keys())
                     lob_python_type = _resolve_oracledb_lob_type()
+                    effective_batch_size = lob_batch_size if lob_indexes else batch_size
                     logger.info(
-                        "Bulk SELECT executed: elapsed_ms=%d",
+                        "Bulk SELECT executed: elapsed_ms=%d lob_cols=%d effective_batch=%d",
                         round((time.monotonic() - t0) * 1000),
+                        len(lob_indexes),
+                        effective_batch_size,
                         extra={"chunk_id": chunk_id_str},
                     )
                     with tgt_conn.cursor() as tgt_cur:
@@ -334,7 +338,7 @@ class BulkChunkProcessor:
                         batch_no = 0
                         while True:
                             t_fetch = time.monotonic()
-                            rows = src_cur.fetchmany(batch_size)
+                            rows = src_cur.fetchmany(effective_batch_size)
                             fetch_ms = round((time.monotonic() - t_fetch) * 1000)
                             if not rows:
                                 break
