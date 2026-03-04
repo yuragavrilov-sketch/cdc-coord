@@ -282,7 +282,8 @@ class CDCConsumer:
             # Determine catchup target (end offset at CDC start time)
             catchup_target = job.catchup_target
             if catchup_target is None:
-                _low, high = consumer.get_watermark_offsets(tp, timeout=10)
+                consumer.list_topics(topic, timeout=10)  # ensure broker metadata is fetched
+                _low, high = consumer.get_watermark_offsets(TopicPartition(topic, 0), timeout=10)
                 catchup_target = high
                 self._repository.set_catchup_target(job.job_id, catchup_target)
                 logger.info("Catchup target set", extra={"job_id": job.job_id, "target": catchup_target})

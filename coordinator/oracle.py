@@ -303,46 +303,69 @@ class OracleIntrospector:
             raise ValidationError("Oracle source connection is not configured")
 
         schema, table = _resolve_table_name(table_name, self._source_schema)
-        qualified_table = _qualified_table_name(schema, table)
 
-        # Estimate row count from Oracle CBO statistics (fast, no full scan)
         approx_rows = self._get_approx_row_count(schema, table)
-        if approx_rows > 0:
-            chunk_count = max(1, math.ceil(approx_rows / chunk_size))
-        else:
-            # Stats not collected — fall back to a single chunk and warn
+        chunk_count = max(1, math.ceil(approx_rows / chunk_size)) if approx_rows > 0 else 1
+        if approx_rows == 0:
             logger.warning(
                 "No row count statistics for %s.%s; creating 1 chunk. "
                 "Run DBMS_STATS.GATHER_TABLE_STATS to populate statistics.",
                 schema, table,
             )
-            chunk_count = 1
 
-        logger.info(
-            "Chunking %s.%s: ~%d rows → %d chunks (chunk_size=%d)",
-            schema, table, approx_rows, chunk_count, chunk_size,
-        )
+        # Build ROWID ranges from Oracle extents — no full table scan
+        extent_query = """
+            SELECT
+                DBMS_ROWID.ROWID_CREATE(1, o.data_object_id, e.relative_fno, e.block_id, 0),
+                DBMS_ROWID.ROWID_CREATE(1, o.data_object_id, e.relative_fno,
+                                        e.block_id + e.blocks - 1, 32767),
+                e.blocks
+            FROM all_extents e
+            JOIN all_objects o
+                ON o.owner = e.owner
+               AND o.object_name = e.segment_name
+               AND o.subobject_name IS NULL
+               AND o.object_type = 'TABLE'
+            WHERE e.owner = UPPER(:owner)
+              AND e.segment_name = UPPER(:table_name)
+            ORDER BY e.relative_fno, e.block_id
+        """
 
-        query = """
-            SELECT MIN(rid), MAX(rid)
-            FROM (
-                SELECT ROWID rid,
-                       NTILE(:chunk_count) OVER (ORDER BY ROWID) AS chunk_no
-                FROM {qualified_table}
-            ) t
-            GROUP BY chunk_no
-            ORDER BY chunk_no
-        """.format(qualified_table=qualified_table)
-
-        chunks: list[RowIdChunk] = []
         with self._connect(self._source) as conn:
             with conn.cursor() as cur:
-                cur.execute(query, chunk_count=chunk_count)
-                for start_rowid, end_rowid in cur.fetchall():
-                    chunks.append(RowIdChunk(start_rowid=start_rowid, end_rowid=end_rowid))
+                cur.execute(extent_query, owner=schema, table_name=table)
+                extents = cur.fetchall()  # [(start_rowid, end_rowid, blocks), ...]
 
-        if not chunks:
-            chunks.append(RowIdChunk(start_rowid=None, end_rowid=None))
+        if not extents:
+            return [RowIdChunk(start_rowid=None, end_rowid=None)]
+
+        total_blocks = sum(e[2] for e in extents)
+        target_blocks = max(1, total_blocks // chunk_count)
+
+        logger.info(
+            "Chunking %s.%s: ~%d rows, %d extents, %d blocks → ~%d chunks",
+            schema, table, approx_rows, len(extents), total_blocks, chunk_count,
+        )
+
+        # Group consecutive extents until we reach target block count per chunk
+        chunks: list[RowIdChunk] = []
+        group_start: str | None = None
+        group_end: str | None = None
+        group_blocks = 0
+
+        for start_rowid, end_rowid, blocks in extents:
+            if group_blocks == 0:
+                group_start = start_rowid
+            group_end = end_rowid
+            group_blocks += blocks
+
+            if group_blocks >= target_blocks:
+                chunks.append(RowIdChunk(start_rowid=group_start, end_rowid=group_end))
+                group_blocks = 0
+
+        if group_blocks > 0:
+            chunks.append(RowIdChunk(start_rowid=group_start, end_rowid=group_end))
+
         return chunks
 
     def _get_approx_row_count(self, schema: str, table: str) -> int:
