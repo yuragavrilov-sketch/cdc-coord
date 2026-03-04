@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -313,59 +314,102 @@ class OracleIntrospector:
                 schema, table,
             )
 
-        # Build ROWID ranges from Oracle extents — no full table scan
-        extent_query = """
-            SELECT
-                DBMS_ROWID.ROWID_CREATE(1, o.data_object_id, e.relative_fno, e.block_id, 0),
-                DBMS_ROWID.ROWID_CREATE(1, o.data_object_id, e.relative_fno,
-                                        e.block_id + e.blocks - 1, 32767),
-                e.blocks
-            FROM all_extents e
-            JOIN all_objects o
-                ON o.owner = e.owner
-               AND o.object_name = e.segment_name
-               AND o.subobject_name IS NULL
-               AND o.object_type = 'TABLE'
-            WHERE e.owner = UPPER(:owner)
-              AND e.segment_name = UPPER(:table_name)
-            ORDER BY e.relative_fno, e.block_id
-        """
+        chunks = self._chunks_by_parallel_execute(schema, table, chunk_size)
+        if chunks is None:
+            chunks = self._chunks_by_sample(schema, table, chunk_count)
+        return chunks or [RowIdChunk(start_rowid=None, end_rowid=None)]
 
+    def _chunks_by_parallel_execute(
+        self, schema: str, table: str, chunk_size: int
+    ) -> list[RowIdChunk] | None:
+        """Build ROWID chunks via DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID.
+        Fast, no full table scan, uses Oracle extent map internally.
+        Returns None if the user lacks EXECUTE ON DBMS_PARALLEL_EXECUTE."""
+        import oracledb
+
+        task_name = f"coord_{uuid.uuid4().hex[:20]}"
+        with self._connect(self._source) as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        BEGIN
+                            DBMS_PARALLEL_EXECUTE.CREATE_TASK(:task_name);
+                            DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID(
+                                task_name   => :task_name,
+                                table_owner => :owner,
+                                table_name  => :table_name,
+                                by_row      => TRUE,
+                                chunk_size  => :chunk_size
+                            );
+                        END;
+                        """,
+                        task_name=task_name,
+                        owner=schema,
+                        table_name=table,
+                        chunk_size=chunk_size,
+                    )
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT start_rowid, end_rowid
+                        FROM user_parallel_execute_chunks
+                        WHERE task_name = :task_name
+                        ORDER BY chunk_id
+                        """,
+                        task_name=task_name,
+                    )
+                    rows = cur.fetchall()
+            except oracledb.DatabaseError as exc:
+                err = str(exc)
+                if "ORA-00942" in err or "ORA-06550" in err or "ORA-04042" in err:
+                    logger.warning(
+                        "DBMS_PARALLEL_EXECUTE unavailable for %s.%s (%s); "
+                        "falling back to SAMPLE BLOCK chunking",
+                        schema, table, err.split("\n")[0],
+                    )
+                    return None
+                raise
+            finally:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:task_name); END;",
+                            task_name=task_name,
+                        )
+                except Exception:
+                    pass  # best-effort cleanup
+
+        chunks = [RowIdChunk(start_rowid=r[0], end_rowid=r[1]) for r in rows]
+        logger.info(
+            "Chunking %s.%s: DBMS_PARALLEL_EXECUTE → %d chunks (chunk_size=%d rows)",
+            schema, table, len(chunks), chunk_size,
+        )
+        return chunks or None
+
+    def _chunks_by_sample(
+        self, schema: str, table: str, chunk_count: int
+    ) -> list[RowIdChunk]:
+        """Build ROWID chunks via SAMPLE BLOCK — fast, no data dictionary access needed."""
+        qualified_table = _qualified_table_name(schema, table)
+        query = """
+            SELECT MIN(rid), MAX(rid)
+            FROM (
+                SELECT ROWID rid,
+                       NTILE(:chunk_count) OVER (ORDER BY ROWID) AS chunk_no
+                FROM {qualified_table} SAMPLE BLOCK(1)
+            ) t
+            GROUP BY chunk_no
+            ORDER BY chunk_no
+        """.format(qualified_table=qualified_table)
+
+        logger.info("Chunking %s.%s: SAMPLE BLOCK(1) → ~%d chunks", schema, table, chunk_count)
+        chunks: list[RowIdChunk] = []
         with self._connect(self._source) as conn:
             with conn.cursor() as cur:
-                cur.execute(extent_query, owner=schema, table_name=table)
-                extents = cur.fetchall()  # [(start_rowid, end_rowid, blocks), ...]
-
-        if not extents:
-            return [RowIdChunk(start_rowid=None, end_rowid=None)]
-
-        total_blocks = sum(e[2] for e in extents)
-        target_blocks = max(1, total_blocks // chunk_count)
-
-        logger.info(
-            "Chunking %s.%s: ~%d rows, %d extents, %d blocks → ~%d chunks",
-            schema, table, approx_rows, len(extents), total_blocks, chunk_count,
-        )
-
-        # Group consecutive extents until we reach target block count per chunk
-        chunks: list[RowIdChunk] = []
-        group_start: str | None = None
-        group_end: str | None = None
-        group_blocks = 0
-
-        for start_rowid, end_rowid, blocks in extents:
-            if group_blocks == 0:
-                group_start = start_rowid
-            group_end = end_rowid
-            group_blocks += blocks
-
-            if group_blocks >= target_blocks:
-                chunks.append(RowIdChunk(start_rowid=group_start, end_rowid=group_end))
-                group_blocks = 0
-
-        if group_blocks > 0:
-            chunks.append(RowIdChunk(start_rowid=group_start, end_rowid=group_end))
-
+                cur.execute(query, chunk_count=chunk_count)
+                for start_rowid, end_rowid in cur.fetchall():
+                    chunks.append(RowIdChunk(start_rowid=start_rowid, end_rowid=end_rowid))
         return chunks
 
     def _get_approx_row_count(self, schema: str, table: str) -> int:
