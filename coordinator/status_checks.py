@@ -70,7 +70,7 @@ def check_state_db_connection(repository: CoordinatorRepository) -> dict[str, st
 
 
 def check_kafka_connection(config: AppConfig, timeout: float = 2.0) -> dict[str, str | None]:
-    broker = config.debezium_connector_template.get("bootstrap.servers") or ""
+    broker = config.kafka_bootstrap_servers or ""
     if not broker:
         return {
             "name": "kafka",
