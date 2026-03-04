@@ -484,8 +484,19 @@ class CoordinatorRepository:
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def _claim_bulk_chunk_sql() -> str:
-        return """
+    def _claim_bulk_chunk_sql(max_per_job: int = 0) -> str:
+        # Round-robin across jobs: prefer the job with fewest currently running chunks so that
+        # slow jobs (e.g. LOB tables) don't starve all workers from faster tables.
+        # max_per_job > 0 adds an advisory cap: skip any job that already has that many running
+        # chunks.  Advisory because under READ COMMITTED concurrent claims may not see each
+        # other's in-flight transactions, but it is accurate enough for scheduling purposes.
+        cap_clause = (
+            f"AND (SELECT COUNT(*) FROM migration_system.migration_chunks c2"
+            f"      WHERE c2.job_id = c.job_id AND c2.status = 'running') < {int(max_per_job)}"
+            if max_per_job > 0
+            else ""
+        )
+        return f"""
                     UPDATE migration_system.migration_chunks
                     SET status = 'running',
                         assigned_worker_id = %s,
@@ -496,8 +507,11 @@ class CoordinatorRepository:
                         JOIN migration_system.migration_jobs j ON c.job_id = j.job_id
                         WHERE c.status = 'pending'
                           AND j.status IN ('bulk_running', 'bulk_loading')
+                          {cap_clause}
                         ORDER BY
                           CASE WHEN j.migration_mode = 'cdc' THEN 0 ELSE 1 END,
+                          (SELECT COUNT(*) FROM migration_system.migration_chunks c2
+                           WHERE c2.job_id = c.job_id AND c2.status = 'running') ASC,
                           c.chunk_id
                         LIMIT 1
                         FOR UPDATE OF c SKIP LOCKED
@@ -505,12 +519,17 @@ class CoordinatorRepository:
                     RETURNING chunk_id, job_id, table_name, start_rowid, end_rowid
                     """
 
-    def claim_bulk_chunk(self, worker_id: str) -> dict[str, Any] | None:
-        """Atomically claim one pending bulk chunk via SKIP LOCKED."""
+    def claim_bulk_chunk(self, worker_id: str, max_per_job: int = 0) -> dict[str, Any] | None:
+        """Atomically claim one pending bulk chunk via SKIP LOCKED.
+
+        max_per_job: advisory limit on how many chunks of the same job can run concurrently.
+        0 means unlimited.  Chunks are always claimed from the job with the fewest running
+        chunks (round-robin) to prevent slow jobs from starving faster ones.
+        """
         with self._db.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    self._claim_bulk_chunk_sql(),
+                    self._claim_bulk_chunk_sql(max_per_job),
                     (worker_id,),
                 )
                 row = cur.fetchone()

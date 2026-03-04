@@ -85,6 +85,7 @@ class AppConfig:
     kafka_bootstrap_servers: str = "localhost:9092"
     worker_bulk_batch_size: int = 1000
     worker_bulk_lob_batch_size: int = 100
+    worker_bulk_max_workers_per_job: int = 0  # 0 = unlimited; set e.g. to 2 to prevent one job from starving others
     worker_cdc_batch_size: int = 500
     worker_poll_interval_seconds: int = 5
     worker_heartbeat_interval_seconds: int = 30
@@ -180,6 +181,7 @@ class AppConfig:
             kafka_bootstrap_servers=kafka_bootstrap,
             worker_bulk_batch_size=int(os.getenv("WORKER_BULK_BATCH_SIZE", "1000")),
             worker_bulk_lob_batch_size=int(os.getenv("WORKER_BULK_LOB_BATCH_SIZE", "100")),
+            worker_bulk_max_workers_per_job=int(os.getenv("WORKER_BULK_MAX_WORKERS_PER_JOB", "0")),
             worker_cdc_batch_size=int(os.getenv("WORKER_CDC_BATCH_SIZE", "500")),
             worker_poll_interval_seconds=int(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "5")),
             worker_heartbeat_interval_seconds=int(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "30")),

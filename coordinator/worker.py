@@ -769,7 +769,9 @@ class BulkWorker:
         logger.info("BulkWorker stopped", extra={"worker_id": self._worker_id})
 
     def _try_bulk_work(self) -> bool:
-        chunk = self._repository.claim_bulk_chunk(self._worker_id)
+        chunk = self._repository.claim_bulk_chunk(
+            self._worker_id, self._config.worker_bulk_max_workers_per_job
+        )
         if not chunk:
             return False
 
@@ -850,7 +852,9 @@ class MigrationWorker:
             logger.exception("MigrationWorker CDC thread error", extra={"worker_id": self._worker_id})
 
     def _try_bulk_work(self) -> bool:
-        chunk = self._repository.claim_bulk_chunk(self._worker_id)
+        chunk = self._repository.claim_bulk_chunk(
+            self._worker_id, self._config.worker_bulk_max_workers_per_job
+        )
         if not chunk:
             return False
 
