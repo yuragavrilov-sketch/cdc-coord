@@ -483,12 +483,9 @@ class CoordinatorRepository:
     # Worker methods
     # -------------------------------------------------------------------------
 
-    def claim_bulk_chunk(self, worker_id: str) -> dict[str, Any] | None:
-        """Atomically claim one pending bulk chunk via SKIP LOCKED."""
-        with self._db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+    @staticmethod
+    def _claim_bulk_chunk_sql() -> str:
+        return """
                     UPDATE migration_system.migration_chunks
                     SET status = 'running',
                         assigned_worker_id = %s,
@@ -499,12 +496,21 @@ class CoordinatorRepository:
                         JOIN migration_system.migration_jobs j ON c.job_id = j.job_id
                         WHERE c.status = 'pending'
                           AND j.status IN ('bulk_running', 'bulk_loading')
-                        ORDER BY c.chunk_id
+                        ORDER BY
+                          CASE WHEN j.migration_mode = 'cdc' THEN 0 ELSE 1 END,
+                          c.chunk_id
                         LIMIT 1
                         FOR UPDATE OF c SKIP LOCKED
                     )
                     RETURNING chunk_id, job_id, table_name, start_rowid, end_rowid
-                    """,
+                    """
+
+    def claim_bulk_chunk(self, worker_id: str) -> dict[str, Any] | None:
+        """Atomically claim one pending bulk chunk via SKIP LOCKED."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    self._claim_bulk_chunk_sql(),
                     (worker_id,),
                 )
                 row = cur.fetchone()
