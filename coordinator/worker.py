@@ -201,6 +201,11 @@ class BulkChunkProcessor:
         )
         insert_sql = _build_bulk_insert_sql(target_table, insertable_cols)
 
+        try:
+            import oracledb as _oracledb
+        except ImportError as exc:
+            raise ExternalServiceError("oracledb package is required for worker") from exc
+
         src_dsn, src_user, src_pwd = _source_cfg(self._config)
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
         rows_processed = 0
@@ -229,7 +234,16 @@ class BulkChunkProcessor:
                                 break
                             batch_no += 1
                             t_insert = time.monotonic()
-                            tgt_cur.executemany(insert_sql, rows, batcherrors=True)
+                            try:
+                                # Fast path: true array INSERT — no per-row error tracking
+                                tgt_cur.executemany(insert_sql, rows)
+                            except _oracledb.IntegrityError:
+                                # Fallback for re-runs: ignore duplicate key per row
+                                logger.debug(
+                                    "Bulk batch has duplicates, retrying with batcherrors",
+                                    extra={"chunk_id": chunk_id_str, "batch": batch_no},
+                                )
+                                tgt_cur.executemany(insert_sql, rows, batcherrors=True)
                             insert_ms = round((time.monotonic() - t_insert) * 1000)
                             t_commit = time.monotonic()
                             tgt_conn.commit()
