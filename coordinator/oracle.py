@@ -299,6 +299,34 @@ class OracleIntrospector:
                 details={"nullable_columns": invalid_nullable},
             )
 
+    def build_hybrid_split(
+        self, table_name: str, chunk_size: int, recent_rows: int
+    ) -> tuple[list[RowIdChunk], list[RowIdChunk]]:
+        """Split table chunks into (recent, historical).
+
+        Recent chunks cover the last ~recent_rows rows by ROWID order (processed first
+        with AS OF SCN + CDC). Historical chunks cover older rows (background static load).
+        Returns (recent_chunks, historical_chunks). historical_chunks may be empty.
+        """
+        all_chunks = self.build_rowid_chunks(table_name, chunk_size)
+
+        # Single empty chunk or no ROWID splits — everything goes to recent
+        if len(all_chunks) <= 1:
+            return all_chunks, []
+
+        scn_count = max(1, math.ceil(recent_rows / chunk_size))
+        if scn_count >= len(all_chunks):
+            return all_chunks, []
+
+        split_idx = len(all_chunks) - scn_count
+        historical = all_chunks[:split_idx]
+        recent = all_chunks[split_idx:]
+        logger.info(
+            "Hybrid split for %s: %d recent chunks, %d historical chunks (recent_rows=%d, chunk_size=%d)",
+            table_name, len(recent), len(historical), recent_rows, chunk_size,
+        )
+        return recent, historical
+
     def build_rowid_chunks(self, table_name: str, chunk_size: int) -> list[RowIdChunk]:
         if not self._source:
             raise ValidationError("Oracle source connection is not configured")

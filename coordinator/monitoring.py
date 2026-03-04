@@ -47,6 +47,14 @@ class MonitoringService:
             if job.migration_mode == "cdc":
                 new_status = "bulk_done"
                 completed = False
+                # Activate child static jobs created by hybrid mode
+                activated = self._repository.activate_child_jobs(job.job_id)
+                if activated:
+                    logger.info(
+                        "Activated %d child static job(s) for hybrid parent",
+                        len(activated),
+                        extra={"parent_job_id": job.job_id},
+                    )
             else:
                 new_status = "completed"
                 completed = True

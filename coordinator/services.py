@@ -55,6 +55,7 @@ class CreateJobRequest:
     message_key_columns: list[str] | None
     idempotency_key: str | None
     chunk_size: int | None
+    recent_rows: int | None = None  # hybrid mode: rows for CDC phase (rest → static background)
 
 
 class CoordinatorService:
@@ -89,8 +90,8 @@ class CoordinatorService:
 
     def create_job(self, request: CreateJobRequest) -> JobRecord:
         mode = request.migration_mode.lower().strip()
-        if mode not in {"cdc", "static"}:
-            raise ValidationError("migration_mode must be 'cdc' or 'static'")
+        if mode not in {"cdc", "static", "hybrid"}:
+            raise ValidationError("migration_mode must be 'cdc', 'static', or 'hybrid'")
 
         source_table, source_schema, source_table_only = _resolve_table_identifier(
             request.table_name,
@@ -104,10 +105,23 @@ class CoordinatorService:
         metadata = self._oracle.fetch_table_metadata(target_table)
 
         key_columns = self._resolve_key_columns(
-            migration_mode=mode,
+            migration_mode=mode if mode != "hybrid" else "cdc",
             metadata=metadata,
             message_key_columns=request.message_key_columns,
         )
+
+        if mode == "hybrid":
+            return self._create_hybrid_job(
+                source_table=source_table,
+                source_schema=source_schema,
+                source_table_only=source_table_only,
+                target_table=target_table,
+                metadata=metadata,
+                key_columns=key_columns,
+                idempotency_key=request.idempotency_key,
+                chunk_size=chunk_size,
+                recent_rows=request.recent_rows or self._config.hybrid_recent_rows,
+            )
 
         if mode == "cdc":
             return self._create_cdc_job(
@@ -139,6 +153,16 @@ class CoordinatorService:
     def delete_job(self, job_id: str) -> dict:
         job = self._repository.get_job(job_id)
         debezium_warning: str | None = None
+
+        # For hybrid parent jobs: delete child static jobs first (FK constraint)
+        child_jobs = self._repository.list_child_jobs(job_id)
+        for child in child_jobs:
+            self._repository.delete_job(child.job_id)
+            logger.info(
+                "Deleted child static job as part of hybrid parent deletion",
+                extra={"parent_job_id": job_id, "child_job_id": child.job_id},
+            )
+
         if job.debezium_connector_name:
             err = self._debezium.delete_connector(job.debezium_connector_name)
             if err:
@@ -248,6 +272,125 @@ class CoordinatorService:
         chunks = self._oracle.build_rowid_chunks(source_table, chunk_size)
         self._repository.save_chunks(job.job_id, source_table, chunks)
         return self._repository.update_job_status(job.job_id, "bulk_running")
+
+    def _create_hybrid_job(
+        self,
+        *,
+        source_table: str,
+        source_schema: str,
+        source_table_only: str,
+        target_table: str,
+        metadata: OracleTableMetadata,
+        key_columns: list[str],
+        idempotency_key: str | None,
+        chunk_size: int,
+        recent_rows: int,
+    ) -> JobRecord:
+        """Create a hybrid migration: CDC job for recent rows + child static job for historical rows.
+
+        The CDC parent job starts immediately (bulk_running).
+        The child static job starts in 'pending' and is activated by the monitoring service
+        when the parent transitions to 'bulk_done' (all recent chunks processed).
+        """
+        job_id = str(uuid.uuid4())
+        scn_cutoff = self._oracle.read_current_scn()
+        connector_name, topic_name, consumer_group = self._build_runtime_names(
+            source_schema,
+            source_table_only,
+            job_id,
+        )
+
+        debezium_config = self._build_debezium_config(
+            connector_name=connector_name,
+            source_table=source_table,
+            source_schema=source_schema,
+            source_table_only=source_table_only,
+            topic_name=topic_name,
+            scn_cutoff=scn_cutoff,
+            key_columns=key_columns,
+            metadata=metadata,
+        )
+
+        self._debezium.create_connector(connector_name, debezium_config)
+
+        parent_job = self._repository.create_job(
+            job_id=job_id,
+            table_name=source_table,
+            target_table_name=target_table,
+            migration_mode="cdc",
+            message_key_columns=None if metadata.pk_columns else key_columns,
+            scn_cutoff=scn_cutoff,
+            connector_name=connector_name,
+            topic_name=topic_name,
+            consumer_group_name=consumer_group,
+            debezium_config=debezium_config,
+            status="cdc_accumulating",
+            idempotency_key=idempotency_key,
+            parent_job_id=None,
+        )
+
+        sql_templates = build_sql_templates(
+            job_id=parent_job.job_id,
+            table_name=target_table,
+            metadata=metadata,
+            key_columns=key_columns,
+            migration_mode="cdc",
+        )
+        self._repository.save_sql_templates(sql_templates)
+
+        self._debezium.wait_for_running(
+            connector_name,
+            timeout_seconds=self._config.monitor_connector_start_timeout_seconds,
+            poll_interval_seconds=self._config.monitor_connector_poll_interval_seconds,
+        )
+
+        # Split chunks: recent → CDC parent, historical → static child
+        recent_chunks, historical_chunks = self._oracle.build_hybrid_split(
+            source_table, chunk_size, recent_rows
+        )
+
+        self._repository.save_chunks(parent_job.job_id, source_table, recent_chunks)
+        parent_job = self._repository.update_job_status(parent_job.job_id, "bulk_running")
+
+        if historical_chunks:
+            child_job = self._repository.create_job(
+                job_id=None,
+                table_name=source_table,
+                target_table_name=target_table,
+                migration_mode="static",
+                message_key_columns=None,
+                scn_cutoff=None,
+                connector_name=None,
+                topic_name=None,
+                consumer_group_name=None,
+                debezium_config=None,
+                # Starts pending — monitoring activates it when parent reaches bulk_done
+                status="pending",
+                idempotency_key=None,
+                parent_job_id=parent_job.job_id,
+            )
+            child_sql_templates = build_sql_templates(
+                job_id=child_job.job_id,
+                table_name=target_table,
+                metadata=metadata,
+                key_columns=key_columns,
+                migration_mode="static",
+            )
+            self._repository.save_sql_templates(child_sql_templates)
+            self._repository.save_chunks(child_job.job_id, source_table, historical_chunks)
+            logger.info(
+                "Hybrid job created: %d recent chunks (CDC parent) + %d historical chunks (static child)",
+                len(recent_chunks), len(historical_chunks),
+                extra={"parent_job_id": parent_job.job_id, "child_job_id": child_job.job_id},
+            )
+        else:
+            logger.info(
+                "Hybrid job created: table fits in recent window, no static child needed (%d chunks)",
+                len(recent_chunks),
+                extra={"parent_job_id": parent_job.job_id},
+            )
+
+        return parent_job
 
     def _create_static_job(
         self,

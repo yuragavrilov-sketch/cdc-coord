@@ -61,9 +61,15 @@ class CoordinatorRepository:
                             config JSONB NOT NULL DEFAULT '{}'::jsonb,
                             idempotency_key VARCHAR(200),
                             created_at TIMESTAMP DEFAULT NOW(),
-                            completed_at TIMESTAMP
+                            completed_at TIMESTAMP,
+                            parent_job_id UUID REFERENCES migration_system.migration_jobs(job_id)
                         )
                         """
+                    )
+                    cur.execute(
+                        "ALTER TABLE migration_system.migration_jobs"
+                        " ADD COLUMN IF NOT EXISTS parent_job_id UUID"
+                        " REFERENCES migration_system.migration_jobs(job_id)"
                     )
                     cur.execute(
                         "CREATE INDEX IF NOT EXISTS idx_jobs_mode_status ON migration_system.migration_jobs (migration_mode, status)"
@@ -142,6 +148,7 @@ class CoordinatorRepository:
         debezium_config: dict[str, Any] | None,
         status: str,
         idempotency_key: str | None,
+        parent_job_id: str | None = None,
     ) -> JobRecord:
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -161,11 +168,11 @@ class CoordinatorRepository:
                         INSERT INTO migration_system.migration_jobs (
                             job_id, table_name, target_table_name, migration_mode, message_key_columns,
                             scn_cutoff, debezium_connector_name, kafka_topic_name, consumer_group_name,
-                            debezium_config, status, config, idempotency_key
+                            debezium_config, status, config, idempotency_key, parent_job_id
                         ) VALUES (
                             %s, %s, %s, %s, %s,
                             %s, %s, %s, %s,
-                            %s, %s, '{}'::jsonb, %s
+                            %s, %s, '{}'::jsonb, %s, %s
                         )
                         RETURNING *
                         """,
@@ -182,6 +189,7 @@ class CoordinatorRepository:
                             Json(debezium_config) if debezium_config is not None else None,
                             status,
                             idempotency_key,
+                            parent_job_id,
                         ),
                     )
                 except Exception as exc:
@@ -436,6 +444,7 @@ class CoordinatorRepository:
         if isinstance(raw_debezium, str):
             raw_debezium = json.loads(raw_debezium)
 
+        raw_parent = row.get("parent_job_id")
         return JobRecord(
             job_id=str(row["job_id"]),
             table_name=row["table_name"],
@@ -456,6 +465,7 @@ class CoordinatorRepository:
             idempotency_key=row.get("idempotency_key"),
             created_at=row.get("created_at"),
             completed_at=row.get("completed_at"),
+            parent_job_id=str(raw_parent) if raw_parent else None,
         )
 
     # -------------------------------------------------------------------------
@@ -524,7 +534,16 @@ class CoordinatorRepository:
         return dict(row) if row else None
 
     def try_claim_cdc_job(self, worker_id: str) -> JobRecord | None:
-        """Claim a CDC job that needs a worker (bulk_done → cdc_catchup, or orphaned cdc_catchup)."""
+        """Claim a single CDC job (legacy, used by MigrationWorker)."""
+        jobs = self.claim_cdc_jobs_batch(worker_id, limit=1)
+        return jobs[0] if jobs else None
+
+    def claim_cdc_jobs_batch(self, worker_id: str, limit: int = 20) -> list[JobRecord]:
+        """Atomically claim up to `limit` unclaimed CDC jobs for this worker.
+
+        Picks jobs with migration_mode='cdc' that have no current owner.
+        bulk_done → cdc_catchup on claim.
+        """
         with self._db.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -534,21 +553,66 @@ class CoordinatorRepository:
                         cdc_started_at = COALESCE(cdc_started_at, NOW()),
                         cdc_heartbeat_at = NOW(),
                         status = CASE WHEN status = 'bulk_done' THEN 'cdc_catchup' ELSE status END
-                    WHERE job_id = (
+                    WHERE job_id IN (
                         SELECT job_id FROM migration_system.migration_jobs
                         WHERE migration_mode = 'cdc'
                           AND status IN ('bulk_done', 'cdc_catchup')
                           AND cdc_owner_worker_id IS NULL
                         ORDER BY created_at
-                        LIMIT 1
+                        LIMIT %s
                         FOR UPDATE SKIP LOCKED
                     )
                     RETURNING *
                     """,
+                    (worker_id, limit),
+                )
+                rows = cur.fetchall()
+        return [self._to_job(r) for r in rows]
+
+    def release_all_cdc_jobs(self, worker_id: str) -> None:
+        """Release ownership of all CDC jobs held by this worker (called on CDCWorker shutdown)."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_jobs
+                    SET cdc_owner_worker_id = NULL,
+                        cdc_started_at = NULL,
+                        cdc_heartbeat_at = NULL
+                    WHERE cdc_owner_worker_id = %s
+                    """,
                     (worker_id,),
                 )
-                row = cur.fetchone()
-        return self._to_job(row) if row else None
+
+    def list_child_jobs(self, parent_job_id: str) -> list[JobRecord]:
+        """Return all jobs whose parent_job_id matches (e.g. hybrid static children)."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM migration_system.migration_jobs WHERE parent_job_id = %s",
+                    (parent_job_id,),
+                )
+                rows = cur.fetchall()
+        return [self._to_job(r) for r in rows]
+
+    def activate_child_jobs(self, parent_job_id: str) -> list[JobRecord]:
+        """Transition pending child static jobs to bulk_running (called when parent reaches bulk_done)."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_jobs
+                    SET status = 'bulk_running'
+                    WHERE parent_job_id = %s
+                      AND migration_mode = 'static'
+                      AND status = 'pending'
+                    RETURNING *
+                    """,
+                    (parent_job_id,),
+                )
+                rows = cur.fetchall()
+        activated = [self._to_job(r) for r in rows]
+        return activated
 
     def release_cdc_ownership(self, job_id: str, worker_id: str) -> None:
         with self._db.connection() as conn:

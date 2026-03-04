@@ -66,14 +66,23 @@ def build_api_blueprint(
         migration_mode = (payload.get("migration_mode") or "").strip().lower()
         if not table_name:
             raise ValidationError("table_name is required")
-        if migration_mode not in {"cdc", "static"}:
-            raise ValidationError("migration_mode must be 'cdc' or 'static'")
+        if migration_mode not in {"cdc", "static", "hybrid"}:
+            raise ValidationError("migration_mode must be 'cdc', 'static', or 'hybrid'")
 
         raw_key_columns = payload.get("message_key_columns")
         if raw_key_columns is not None and not isinstance(raw_key_columns, list):
             raise ValidationError("message_key_columns must be an array of strings")
 
         key_columns = [str(value).strip() for value in (raw_key_columns or []) if str(value).strip()]
+
+        raw_recent_rows = payload.get("recent_rows")
+        if raw_recent_rows is not None:
+            try:
+                raw_recent_rows = int(raw_recent_rows)
+                if raw_recent_rows <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValidationError("recent_rows must be a positive integer")
 
         create_request = CreateJobRequest(
             table_name=table_name,
@@ -82,6 +91,7 @@ def build_api_blueprint(
             message_key_columns=key_columns or None,
             idempotency_key=request.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
             chunk_size=payload.get("chunk_size"),
+            recent_rows=raw_recent_rows,
         )
         job = service.create_job(create_request)
         return jsonify(job.to_dict()), 201

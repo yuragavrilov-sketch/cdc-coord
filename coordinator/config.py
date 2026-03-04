@@ -88,6 +88,11 @@ class AppConfig:
     worker_poll_interval_seconds: int = 5
     worker_heartbeat_interval_seconds: int = 30
     worker_chunk_timeout_seconds: int = 600
+    # Hybrid mode
+    hybrid_recent_rows: int = 2_000_000
+    # CDC worker (multi-table)
+    cdc_worker_job_limit: int = 20
+    cdc_worker_refresh_interval_seconds: int = 10
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -177,6 +182,9 @@ class AppConfig:
             worker_poll_interval_seconds=int(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "5")),
             worker_heartbeat_interval_seconds=int(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "30")),
             worker_chunk_timeout_seconds=int(os.getenv("WORKER_CHUNK_TIMEOUT_SECONDS", "600")),
+            hybrid_recent_rows=int(os.getenv("HYBRID_RECENT_ROWS", "2000000")),
+            cdc_worker_job_limit=int(os.getenv("CDC_WORKER_JOB_LIMIT", "20")),
+            cdc_worker_refresh_interval_seconds=int(os.getenv("CDC_WORKER_REFRESH_INTERVAL_SECONDS", "10")),
         )
 
     def validate(self) -> None:

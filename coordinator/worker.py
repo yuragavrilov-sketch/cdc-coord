@@ -6,11 +6,11 @@ import signal
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Iterator
 
 from .config import AppConfig
 from .errors import ExternalServiceError, NotFoundError, ValidationError
-from .models import JobRecord
 from .repositories import CoordinatorRepository
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,15 @@ def _build_source_select(
     return f"SELECT {cols_str} FROM {from_clause}{where}", params
 
 
+def _build_bulk_insert_sql(table_name: str, columns: list[str]) -> str:
+    """Plain INSERT for bulk load — use with executemany(batcherrors=True) for idempotency.
+    Positional binds (:1,:2,...) + tuple rows avoids per-row dict creation overhead."""
+    qualified = _qualified_table(table_name)
+    insert_cols = ", ".join(f'"{c}"' for c in columns)
+    insert_vals = ", ".join(f":{i + 1}" for i in range(len(columns)))
+    return f"INSERT /*+ APPEND_VALUES */ INTO {qualified} ({insert_cols}) VALUES ({insert_vals})"
+
+
 def _build_bulk_merge_sql(table_name: str, columns: list[str], pk_columns: list[str]) -> str:
     """MERGE with WHEN NOT MATCHED only — idempotent bulk load."""
     qualified = _qualified_table(table_name)
@@ -99,15 +108,6 @@ def _build_bulk_merge_sql(table_name: str, columns: list[str], pk_columns: list[
         f"ON ({merge_on}) "
         f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
     )
-
-
-def _build_bulk_insert_sql(table_name: str, columns: list[str]) -> str:
-    """Plain INSERT for bulk load — use with executemany(batcherrors=True) for idempotency.
-    Positional binds (:1,:2,...) + tuple rows avoids per-row dict creation overhead."""
-    qualified = _qualified_table(table_name)
-    insert_cols = ", ".join(f'"{c}"' for c in columns)
-    insert_vals = ", ".join(f":{i + 1}" for i in range(len(columns)))
-    return f"INSERT INTO {qualified} ({insert_cols}) VALUES ({insert_vals})"
 
 
 def _build_cdc_merge_sql(table_name: str, columns: list[str], pk_columns: list[str]) -> str:
@@ -138,35 +138,56 @@ def _build_cdc_delete_sql(table_name: str, pk_columns: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Heartbeat thread
+# Oracle index management helpers
 # ---------------------------------------------------------------------------
 
 
-class _HeartbeatThread(threading.Thread):
-    def __init__(
-        self,
-        repository: CoordinatorRepository,
-        job_id: str,
-        worker_id: str,
-        interval_seconds: int,
-    ) -> None:
-        super().__init__(daemon=True, name=f"heartbeat-{job_id[:8]}")
-        self._repository = repository
-        self._job_id = job_id
-        self._worker_id = worker_id
-        self._interval = interval_seconds
-        self._stop = threading.Event()
+def _disable_target_nonunique_indexes(conn: Any, schema: str, table: str) -> None:
+    """Mark all non-unique indexes on target table as UNUSABLE (idempotent, fast)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT index_name FROM all_indexes
+            WHERE table_owner = :owner AND table_name = :tbl
+              AND uniqueness = 'NONUNIQUE' AND status != 'UNUSABLE'
+            """,
+            owner=schema,
+            tbl=table,
+        )
+        names = [row[0] for row in cur.fetchall()]
 
-    def run(self) -> None:
-        while not self._stop.wait(self._interval):
-            try:
-                self._repository.update_cdc_heartbeat(self._job_id, self._worker_id)
-                logger.debug("Heartbeat sent", extra={"job_id": self._job_id})
-            except Exception:
-                logger.warning("Heartbeat update failed", extra={"job_id": self._job_id})
+    if not names:
+        return
+    for name in names:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'ALTER INDEX "{schema}"."{name}" UNUSABLE')
+        except Exception as exc:
+            logger.warning("Cannot disable index %s.%s: %s", schema, name, exc)
+    logger.info("Disabled non-unique indexes on %s.%s: %s", schema, table, names)
 
-    def stop(self) -> None:
-        self._stop.set()
+
+def _rebuild_target_unusable_indexes(conn: Any, schema: str, table: str) -> None:
+    """Rebuild all UNUSABLE indexes on target table after bulk load."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT index_name FROM all_indexes
+            WHERE table_owner = :owner AND table_name = :tbl AND status = 'UNUSABLE'
+            """,
+            owner=schema,
+            tbl=table,
+        )
+        names = [row[0] for row in cur.fetchall()]
+
+    for name in names:
+        try:
+            t0 = time.monotonic()
+            with conn.cursor() as cur:
+                cur.execute(f'ALTER INDEX "{schema}"."{name}" REBUILD NOLOGGING')
+            logger.info("Rebuilt index %s.%s in %ds", schema, name, round(time.monotonic() - t0))
+        except Exception as exc:
+            logger.warning("Cannot rebuild index %s.%s: %s", schema, name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -189,12 +210,15 @@ class BulkChunkProcessor:
             raise RuntimeError(f"No SQL templates found for job {job.job_id}")
 
         insertable_cols: list[str] = templates["insertable_columns"]
-        pk_cols: list[str] = templates["pk_columns"]
         source_table = job.table_name
         target_table = job.target_table_name or job.table_name
-        scn_cutoff = job.scn_cutoff  # None for STATIC mode
+        scn_cutoff = job.scn_cutoff
         start_rowid: str | None = chunk.get("start_rowid")
         end_rowid: str | None = chunk.get("end_rowid")
+
+        # Child static jobs (hybrid background phase) run with CDC already active.
+        # Skip index management to avoid disrupting concurrent CDC writes.
+        is_child_static = job.parent_job_id is not None
 
         select_sql, select_params = _build_source_select(
             source_table, insertable_cols, scn_cutoff, start_rowid, end_rowid
@@ -205,11 +229,14 @@ class BulkChunkProcessor:
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
         rows_processed = 0
         batch_size = self._config.worker_bulk_batch_size
+        tgt_schema, tgt_table = target_table.split(".", 1)
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn:
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
                 with tgt_conn.cursor() as _cur:
                     _cur.execute("ALTER SESSION SET SKIP_UNUSABLE_INDEXES = TRUE")
+                if not is_child_static:
+                    _disable_target_nonunique_indexes(tgt_conn, tgt_schema, tgt_table)
                 chunk_id_str = str(chunk["chunk_id"])
                 with src_conn.cursor() as src_cur:
                     src_cur.arraysize = batch_size
@@ -245,14 +272,59 @@ class BulkChunkProcessor:
 
         return rows_processed
 
+    def rebuild_indexes_if_done(self, chunk: dict[str, Any]) -> None:
+        """Called after complete_chunk. Rebuilds indexes if this was the last chunk for the job.
+
+        For child static jobs: rebuilds when all its own chunks are done (CDC continues unaffected
+        since REBUILD NOLOGGING is fast on historical data and indexes were never disabled for child).
+        For parent/standalone jobs: rebuilds when all chunks are done.
+        """
+        job_id = str(chunk["job_id"])
+        if not self._repository.all_chunks_completed(job_id):
+            return
+
+        job = self._repository.get_job(job_id)
+        target_table = job.target_table_name or job.table_name
+        tgt_schema, tgt_table = target_table.split(".", 1)
+        tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
+
+        logger.info(
+            "All chunks done — rebuilding indexes on %s.%s (job_id=%s)",
+            tgt_schema, tgt_table, job_id,
+        )
+        with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
+            _rebuild_target_unusable_indexes(tgt_conn, tgt_schema, tgt_table)
+
 
 # ---------------------------------------------------------------------------
-# CDCConsumer
+# Per-job state for MultiTableCDCConsumer
 # ---------------------------------------------------------------------------
 
 
-class CDCConsumer:
-    """Applies Debezium/Kafka CDC events to Oracle target. Blocking."""
+@dataclass(slots=True)
+class _CDCJobState:
+    job_id: str
+    topic: str
+    consumer_group: str
+    merge_sql: str
+    delete_sql: str
+    pk_cols: list[str]
+    catchup_target: int
+    is_streaming: bool
+
+
+# ---------------------------------------------------------------------------
+# MultiTableCDCConsumer
+# ---------------------------------------------------------------------------
+
+
+class MultiTableCDCConsumer:
+    """Handles multiple CDC jobs simultaneously in a single Kafka consumer session.
+
+    Dynamically discovers and subscribes to new jobs without restart.
+    Uses manual partition assignment (assign()) — no consumer-group rebalancing.
+    All jobs share one Oracle target connection.
+    """
 
     def __init__(
         self,
@@ -265,149 +337,316 @@ class CDCConsumer:
         self._repository = repository
         self._worker_id = worker_id
         self._shutdown_event = shutdown_event
+        self._jobs: dict[str, _CDCJobState] = {}        # job_id → state
+        self._jobs_by_topic: dict[str, _CDCJobState] = {}  # topic  → state
 
-    def run(self, job: JobRecord) -> None:
+    def run(self) -> None:
         try:
-            from confluent_kafka import Consumer, TopicPartition
+            from confluent_kafka import Consumer
         except ImportError as exc:
             raise ExternalServiceError("confluent_kafka is required for CDC processing") from exc
-
-        templates = self._repository.get_sql_templates(job.job_id)
-        if not templates:
-            raise RuntimeError(f"No SQL templates found for job {job.job_id}")
-
-        insertable_cols: list[str] = templates["insertable_columns"]
-        pk_cols: list[str] = templates["pk_columns"]
-        topic: str = job.kafka_topic_name  # type: ignore[assignment]
-        group_id: str = job.consumer_group_name  # type: ignore[assignment]
-        target_table = job.target_table_name or job.table_name
-
-        merge_sql = _build_cdc_merge_sql(target_table, insertable_cols, pk_cols)
-        delete_sql = _build_cdc_delete_sql(target_table, pk_cols)
 
         consumer = Consumer(
             {
                 "bootstrap.servers": self._config.kafka_bootstrap_servers,
-                "group.id": group_id,
+                # Unique group per worker — offsets are managed in PG, not Kafka
+                "group.id": f"cdc-worker-{self._worker_id}",
                 "enable.auto.commit": "false",
                 "auto.offset.reset": "earliest",
             }
         )
-        logger.info("CDC consumer created", extra={"job_id": job.job_id, "topic": topic})
+        logger.info("MultiTableCDCConsumer started", extra={"worker_id": self._worker_id})
+
+        tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
+        refresh_interval = self._config.cdc_worker_refresh_interval_seconds
+        heartbeat_interval = self._config.worker_heartbeat_interval_seconds
+        last_refresh = 0.0
+        last_heartbeat = 0.0
+        # Prune completed jobs less frequently to reduce DB load
+        last_prune = 0.0
+        prune_interval = 60.0
 
         try:
-            saved = self._repository.get_kafka_offsets(group_id, topic)
-            if saved and 0 in saved:
-                resume_offset = saved[0] + 1
-                logger.info("CDC resuming", extra={"job_id": job.job_id, "offset": resume_offset})
-            else:
-                resume_offset = 0
-                logger.info("CDC starting from beginning", extra={"job_id": job.job_id})
-
-            tp = TopicPartition(topic, 0, resume_offset)
-            consumer.assign([tp])
-
-            # Determine catchup target (end offset at CDC start time)
-            catchup_target = job.catchup_target
-            if catchup_target is None:
-                consumer.list_topics(topic, timeout=10)  # ensure broker metadata is fetched
-                _low, high = consumer.get_watermark_offsets(TopicPartition(topic, 0), timeout=10)
-                catchup_target = high
-                self._repository.set_catchup_target(job.job_id, catchup_target)
-                logger.info("Catchup target set", extra={"job_id": job.job_id, "target": catchup_target})
-
-            is_streaming = job.status == "cdc_streaming"
-
-            tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
                 while not self._shutdown_event.is_set():
-                    # Periodically check if job was externally completed/cancelled/deleted
-                    try:
-                        current_job = self._repository.get_job(job.job_id)
-                    except NotFoundError:
-                        logger.info("Job deleted externally, stopping CDC", extra={"job_id": job.job_id})
-                        break
-                    if current_job.status == "completed":
-                        logger.info("Job completed externally, stopping CDC", extra={"job_id": job.job_id})
-                        break
+                    now = time.monotonic()
+
+                    # Claim new CDC jobs periodically
+                    if now - last_refresh >= refresh_interval:
+                        self._refresh_jobs(consumer)
+                        last_refresh = now
+
+                    if not self._jobs:
+                        self._shutdown_event.wait(refresh_interval)
+                        continue
 
                     msgs = consumer.consume(
                         num_messages=self._config.worker_cdc_batch_size,
                         timeout=1.0,
                     )
+
                     if not msgs:
+                        if now - last_heartbeat >= heartbeat_interval:
+                            self._send_heartbeats()
+                            last_heartbeat = now
+                        if now - last_prune >= prune_interval:
+                            self._prune_completed_jobs(consumer)
+                            last_prune = now
                         continue
 
-                    current_offsets: dict[int, int] = {}
+                    # Route and apply events
+                    topic_max_offsets: dict[str, int] = {}
                     for msg in msgs:
                         if msg.error():
                             logger.warning(
                                 "Kafka message error: %s",
                                 msg.error(),
-                                extra={"job_id": job.job_id},
+                                extra={"worker_id": self._worker_id},
                             )
                             continue
-                        self._apply_event(tgt_conn, msg, merge_sql, delete_sql, pk_cols)
-                        current_offsets[msg.partition()] = msg.offset()
+                        state = self._jobs_by_topic.get(msg.topic())
+                        if state:
+                            self._apply_event(tgt_conn, msg, state)
+                            topic_max_offsets[msg.topic()] = max(
+                                topic_max_offsets.get(msg.topic(), -1), msg.offset()
+                            )
 
-                    # Commit Oracle then save offsets to PG then commit Kafka
+                    # Commit Oracle (covers all tables in this batch)
                     tgt_conn.commit()
-                    self._repository.save_kafka_offsets(group_id, topic, current_offsets)
-                    consumer.commit()
 
-                    # Check catchup completion
-                    if not is_streaming and current_offsets:
-                        max_offset = max(current_offsets.values())
-                        if max_offset + 1 >= catchup_target:
-                            self._repository.update_job_status(job.job_id, "cdc_streaming")
-                            is_streaming = True
+                    # Save offsets per job and check catchup completion
+                    for topic, max_offset in topic_max_offsets.items():
+                        state = self._jobs_by_topic.get(topic)
+                        if not state:
+                            continue
+                        self._repository.save_kafka_offsets(
+                            state.consumer_group, topic, {0: max_offset}
+                        )
+                        if not state.is_streaming and max_offset + 1 >= state.catchup_target:
+                            self._repository.update_job_status(state.job_id, "cdc_streaming")
+                            state.is_streaming = True
                             logger.info(
                                 "CDC catchup complete → streaming",
-                                extra={"job_id": job.job_id, "offset": max_offset},
+                                extra={"job_id": state.job_id, "offset": max_offset},
                             )
+
+                    consumer.commit()
+
+                    now = time.monotonic()
+                    if now - last_heartbeat >= heartbeat_interval:
+                        self._send_heartbeats()
+                        last_heartbeat = now
+                    if now - last_prune >= prune_interval:
+                        self._prune_completed_jobs(consumer)
+                        last_prune = now
+
         finally:
             consumer.close()
-            logger.info("CDC consumer closed", extra={"job_id": job.job_id})
+            self._release_all_jobs()
+            logger.info("MultiTableCDCConsumer stopped", extra={"worker_id": self._worker_id})
 
-    def _apply_event(
-        self,
-        conn: Any,
-        msg: Any,
-        merge_sql: str,
-        delete_sql: str,
-        pk_cols: list[str],
-    ) -> None:
+    def _refresh_jobs(self, consumer: Any) -> None:
+        """Claim new unclaimed CDC jobs and add their Kafka topics to the consumer."""
+        from confluent_kafka import TopicPartition
+
+        available_slots = self._config.cdc_worker_job_limit - len(self._jobs)
+        if available_slots <= 0:
+            return
+
+        new_jobs = self._repository.claim_cdc_jobs_batch(self._worker_id, limit=available_slots)
+        if not new_jobs:
+            return
+
+        new_tps: list[Any] = []
+        newly_added: list[_CDCJobState] = []
+
+        for job in new_jobs:
+            if job.job_id in self._jobs:
+                continue
+
+            templates = self._repository.get_sql_templates(job.job_id)
+            if not templates:
+                logger.warning(
+                    "No SQL templates for CDC job %s, skipping", job.job_id,
+                    extra={"worker_id": self._worker_id},
+                )
+                continue
+
+            topic: str = job.kafka_topic_name  # type: ignore[assignment]
+            insertable_cols: list[str] = templates["insertable_columns"]
+            pk_cols: list[str] = templates["pk_columns"]
+            target_table = job.target_table_name or job.table_name
+
+            saved = self._repository.get_kafka_offsets(job.consumer_group_name, topic)  # type: ignore[arg-type]
+            resume_offset = (saved[0] + 1) if saved and 0 in saved else 0
+
+            state = _CDCJobState(
+                job_id=job.job_id,
+                topic=topic,
+                consumer_group=job.consumer_group_name,  # type: ignore[arg-type]
+                merge_sql=_build_cdc_merge_sql(target_table, insertable_cols, pk_cols),
+                delete_sql=_build_cdc_delete_sql(target_table, pk_cols),
+                pk_cols=pk_cols,
+                catchup_target=job.catchup_target or 0,
+                is_streaming=(job.status == "cdc_streaming"),
+            )
+
+            self._jobs[job.job_id] = state
+            self._jobs_by_topic[topic] = state
+            new_tps.append(TopicPartition(topic, 0, resume_offset))
+            newly_added.append(state)
+            logger.info(
+                "CDCWorker claimed job",
+                extra={"job_id": job.job_id, "topic": topic, "worker_id": self._worker_id},
+            )
+
+        if not new_tps:
+            return
+
+        current = list(consumer.assignment())
+        consumer.assign(current + new_tps)
+
+        # Resolve catchup targets for newly added jobs that don't have one yet
+        for state in newly_added:
+            if state.catchup_target == 0 and not state.is_streaming:
+                try:
+                    consumer.list_topics(state.topic, timeout=10)
+                    _, high = consumer.get_watermark_offsets(TopicPartition(state.topic, 0), timeout=10)
+                    state.catchup_target = high
+                    self._repository.set_catchup_target(state.job_id, high)
+                    logger.info(
+                        "Catchup target set",
+                        extra={"job_id": state.job_id, "target": high},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Cannot resolve catchup target for %s: %s", state.topic, exc,
+                        extra={"job_id": state.job_id},
+                    )
+
+    def _prune_completed_jobs(self, consumer: Any) -> None:
+        """Remove externally completed or deleted jobs from local state."""
+        to_remove: list[_CDCJobState] = []
+        for job_id, state in list(self._jobs.items()):
+            try:
+                job = self._repository.get_job(job_id)
+                if job.status == "completed":
+                    to_remove.append(state)
+            except NotFoundError:
+                to_remove.append(state)
+
+        if not to_remove:
+            return
+
+        remove_topics = {s.topic for s in to_remove}
+        for state in to_remove:
+            self._jobs.pop(state.job_id, None)
+            self._jobs_by_topic.pop(state.topic, None)
+            logger.info(
+                "CDCWorker removed completed/deleted job",
+                extra={"job_id": state.job_id, "worker_id": self._worker_id},
+            )
+
+        remaining = [tp for tp in consumer.assignment() if tp.topic not in remove_topics]
+        consumer.assign(remaining)
+
+    def _send_heartbeats(self) -> None:
+        for job_id in list(self._jobs.keys()):
+            try:
+                self._repository.update_cdc_heartbeat(job_id, self._worker_id)
+            except Exception:
+                logger.warning("Heartbeat failed for job %s", job_id)
+
+    def _release_all_jobs(self) -> None:
+        try:
+            self._repository.release_all_cdc_jobs(self._worker_id)
+        except Exception:
+            logger.warning("Failed to release CDC jobs for worker %s", self._worker_id)
+        self._jobs.clear()
+        self._jobs_by_topic.clear()
+
+    def _apply_event(self, conn: Any, msg: Any, state: _CDCJobState) -> None:
         try:
             payload = json.loads(msg.value().decode("utf-8"))
         except Exception as exc:
             logger.warning("Cannot parse Kafka message at offset %s: %s", msg.offset(), exc)
             return
 
-        # Debezium envelope: {"payload": {"op": ..., "before": ..., "after": ...}}
         data = payload.get("payload") or payload
         op = data.get("op")
         after: dict[str, Any] | None = data.get("after")
         before: dict[str, Any] | None = data.get("before")
 
-        with conn.cursor() as cur:
-            if op in ("c", "r", "u") and after is not None:
-                cur.execute(merge_sql, after)
-            elif op == "d" and before is not None:
-                key_row = {k: before[k] for k in pk_cols if k in before}
-                cur.execute(delete_sql, key_row)
-            else:
-                logger.debug("Skipping Kafka event op=%s offset=%s", op, msg.offset())
+        try:
+            with conn.cursor() as cur:
+                if op in ("c", "r", "u") and after is not None:
+                    cur.execute(state.merge_sql, after)
+                elif op == "d" and before is not None:
+                    key_row = {k: before[k] for k in state.pk_cols if k in before}
+                    cur.execute(state.delete_sql, key_row)
+                else:
+                    logger.debug(
+                        "Skipping CDC event op=%s offset=%s topic=%s", op, msg.offset(), state.topic,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Failed to apply CDC event op=%s offset=%s topic=%s: %s",
+                op, msg.offset(), state.topic, exc,
+                extra={"job_id": state.job_id},
+            )
 
 
 # ---------------------------------------------------------------------------
-# MigrationWorker
+# CDCWorker — dedicated multi-table CDC worker
 # ---------------------------------------------------------------------------
 
 
-class MigrationWorker:
+class CDCWorker:
+    """Dedicated CDC worker. Manages multiple tables simultaneously via one Kafka consumer.
+
+    Start multiple CDCWorker processes (e.g. 2) for CDC redundancy and throughput.
+    Each worker claims up to cdc_worker_job_limit jobs.
     """
-    Main worker process. Homogeneous — dynamically takes either a bulk chunk
-    or CDC ownership depending on what's available.
+
+    def __init__(
+        self,
+        worker_id: str,
+        config: AppConfig,
+        repository: CoordinatorRepository,
+    ) -> None:
+        self._worker_id = worker_id
+        self._config = config
+        self._repository = repository
+        self._shutdown_event = threading.Event()
+        self._consumer = MultiTableCDCConsumer(
+            config, repository, worker_id, self._shutdown_event
+        )
+
+    def shutdown(self) -> None:
+        logger.info("CDCWorker shutdown requested", extra={"worker_id": self._worker_id})
+        self._shutdown_event.set()
+
+    def run(self) -> None:
+        signal.signal(signal.SIGTERM, lambda *_: self.shutdown())
+        signal.signal(signal.SIGINT, lambda *_: self.shutdown())
+        logger.info("CDCWorker started", extra={"worker_id": self._worker_id})
+        try:
+            self._consumer.run()
+        except Exception:
+            logger.exception("CDCWorker fatal error", extra={"worker_id": self._worker_id})
+        logger.info("CDCWorker stopped", extra={"worker_id": self._worker_id})
+
+
+# ---------------------------------------------------------------------------
+# BulkWorker — dedicated bulk chunk worker
+# ---------------------------------------------------------------------------
+
+
+class BulkWorker:
+    """Dedicated bulk chunk worker. Processes ROWID chunks from any job.
+
+    Start multiple BulkWorker processes (e.g. 4) to parallelise bulk loading.
+    Workers have no CDC responsibility — they only process chunks.
     """
 
     def __init__(
@@ -421,64 +660,28 @@ class MigrationWorker:
         self._repository = repository
         self._shutdown_event = threading.Event()
         self._bulk = BulkChunkProcessor(config, repository)
-        self._cdc = CDCConsumer(config, repository, worker_id, self._shutdown_event)
 
     def shutdown(self) -> None:
-        logger.info("Shutdown requested", extra={"worker_id": self._worker_id})
+        logger.info("BulkWorker shutdown requested", extra={"worker_id": self._worker_id})
         self._shutdown_event.set()
 
     def run(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.shutdown())
         signal.signal(signal.SIGINT, lambda *_: self.shutdown())
-
-        logger.info("Worker started", extra={"worker_id": self._worker_id})
+        logger.info("BulkWorker started", extra={"worker_id": self._worker_id})
 
         while not self._shutdown_event.is_set():
             try:
-                if self._try_cdc_work():
-                    continue
                 if self._try_bulk_work():
                     continue
-                # Nothing to do — idle wait
                 self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
             except Exception:
-                logger.exception("Unexpected error in worker loop", extra={"worker_id": self._worker_id})
+                logger.exception("BulkWorker error", extra={"worker_id": self._worker_id})
                 self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
 
-        logger.info("Worker stopped", extra={"worker_id": self._worker_id})
-
-    def _try_cdc_work(self) -> bool:
-        """Try to claim a CDC job. Returns True if work was done (blocking until CDC ends)."""
-        job = self._repository.try_claim_cdc_job(self._worker_id)
-        if not job:
-            return False
-
-        logger.info(
-            "CDC ownership claimed",
-            extra={"job_id": job.job_id, "status": job.status, "worker_id": self._worker_id},
-        )
-        heartbeat = _HeartbeatThread(
-            self._repository,
-            job.job_id,
-            self._worker_id,
-            self._config.worker_heartbeat_interval_seconds,
-        )
-        heartbeat.start()
-        try:
-            self._cdc.run(job)
-        except Exception:
-            logger.exception("CDC consumer error", extra={"job_id": job.job_id})
-        finally:
-            heartbeat.stop()
-            try:
-                self._repository.release_cdc_ownership(job.job_id, self._worker_id)
-                logger.info("CDC ownership released", extra={"job_id": job.job_id})
-            except Exception:
-                logger.warning("Failed to release CDC ownership", extra={"job_id": job.job_id})
-        return True
+        logger.info("BulkWorker stopped", extra={"worker_id": self._worker_id})
 
     def _try_bulk_work(self) -> bool:
-        """Try to claim and process one bulk chunk. Returns True if a chunk was taken."""
         chunk = self._repository.claim_bulk_chunk(self._worker_id)
         if not chunk:
             return False
@@ -488,6 +691,88 @@ class MigrationWorker:
         try:
             rows = self._bulk.process(chunk)
             self._repository.complete_chunk(chunk_id, rows)
+            # Check AFTER marking complete — all_chunks_completed may now be True
+            self._bulk.rebuild_indexes_if_done(chunk)
+            logger.info("Bulk chunk completed", extra={"chunk_id": chunk_id, "rows": rows})
+        except Exception as exc:
+            logger.exception("Bulk chunk failed", extra={"chunk_id": chunk_id})
+            self._repository.fail_chunk(chunk_id, str(exc))
+        return True
+
+
+# ---------------------------------------------------------------------------
+# MigrationWorker — legacy mixed worker (CDC + bulk in one process)
+# ---------------------------------------------------------------------------
+
+
+class MigrationWorker:
+    """Legacy mixed worker: tries CDC work first, then bulk.
+
+    Use CDCWorker + BulkWorker separately for production deployments.
+    This class is kept for backward compatibility and simple single-process setups.
+    """
+
+    def __init__(
+        self,
+        worker_id: str,
+        config: AppConfig,
+        repository: CoordinatorRepository,
+    ) -> None:
+        self._worker_id = worker_id
+        self._config = config
+        self._repository = repository
+        self._shutdown_event = threading.Event()
+        self._bulk = BulkChunkProcessor(config, repository)
+        self._cdc_consumer = MultiTableCDCConsumer(
+            config, repository, worker_id, self._shutdown_event
+        )
+        self._cdc_thread: threading.Thread | None = None
+
+    def shutdown(self) -> None:
+        logger.info("Shutdown requested", extra={"worker_id": self._worker_id})
+        self._shutdown_event.set()
+
+    def run(self) -> None:
+        signal.signal(signal.SIGTERM, lambda *_: self.shutdown())
+        signal.signal(signal.SIGINT, lambda *_: self.shutdown())
+        logger.info("MigrationWorker started", extra={"worker_id": self._worker_id})
+
+        # Run CDC consumer in a background thread so bulk work can proceed in parallel
+        self._cdc_thread = threading.Thread(
+            target=self._run_cdc, daemon=True, name=f"cdc-{self._worker_id[:8]}"
+        )
+        self._cdc_thread.start()
+
+        while not self._shutdown_event.is_set():
+            try:
+                if self._try_bulk_work():
+                    continue
+                self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
+            except Exception:
+                logger.exception("MigrationWorker bulk error", extra={"worker_id": self._worker_id})
+                self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
+
+        if self._cdc_thread:
+            self._cdc_thread.join(timeout=10)
+        logger.info("MigrationWorker stopped", extra={"worker_id": self._worker_id})
+
+    def _run_cdc(self) -> None:
+        try:
+            self._cdc_consumer.run()
+        except Exception:
+            logger.exception("MigrationWorker CDC thread error", extra={"worker_id": self._worker_id})
+
+    def _try_bulk_work(self) -> bool:
+        chunk = self._repository.claim_bulk_chunk(self._worker_id)
+        if not chunk:
+            return False
+
+        chunk_id = str(chunk["chunk_id"])
+        logger.info("Bulk chunk claimed", extra={"chunk_id": chunk_id, "worker_id": self._worker_id})
+        try:
+            rows = self._bulk.process(chunk)
+            self._repository.complete_chunk(chunk_id, rows)
+            self._bulk.rebuild_indexes_if_done(chunk)
             logger.info("Bulk chunk completed", extra={"chunk_id": chunk_id, "rows": rows})
         except Exception as exc:
             logger.exception("Bulk chunk failed", extra={"chunk_id": chunk_id})

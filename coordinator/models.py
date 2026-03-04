@@ -26,6 +26,7 @@ class JobRecord:
     idempotency_key: str | None
     created_at: datetime | None
     completed_at: datetime | None
+    parent_job_id: str | None = None  # set on child static job created by hybrid mode
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
