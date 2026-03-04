@@ -138,6 +138,27 @@ def build_api_blueprint(
             },
         }), 200
 
+    @bp.get("/tables/<path:table_name>/jobs")
+    def get_jobs_for_table(table_name: str):
+        jobs = repository.list_jobs_for_table(table_name)
+        items = []
+        for job in jobs:
+            d = job.to_dict()
+            chunks = repository.list_chunks(job.job_id)
+            by_status: dict[str, int] = {}
+            for c in chunks:
+                by_status[c["status"]] = by_status.get(c["status"], 0) + 1
+            completed = [c for c in chunks if c["status"] == "completed"]
+            total_rows = sum(c["rows_processed"] for c in completed)
+            d["_chunk_stats"] = {
+                "total": len(chunks),
+                "by_status": by_status,
+                "rows_processed": sum(c["rows_processed"] for c in chunks),
+                "avg_rows_per_second": _wall_clock_rows_per_second(completed, total_rows),
+            }
+            items.append(d)
+        return jsonify({"items": items, "count": len(items)}), 200
+
     @bp.get("/tables/<path:table_name>/columns")
     def get_table_columns(table_name: str):
         target_cfg = (

@@ -110,6 +110,8 @@ class CoordinatorService:
             message_key_columns=request.message_key_columns,
         )
 
+        self._repository.upsert_migration_table(source_table)
+
         if mode == "hybrid":
             return self._create_hybrid_job(
                 source_table=source_table,

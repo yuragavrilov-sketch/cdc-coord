@@ -130,6 +130,17 @@ class CoordinatorRepository:
                         )
                         """
                     )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system.migration_tables (
+                            table_name VARCHAR(200) PRIMARY KEY,
+                            notes TEXT,
+                            priority INT DEFAULT 0,
+                            created_at TIMESTAMP DEFAULT NOW(),
+                            updated_at TIMESTAMP DEFAULT NOW()
+                        )
+                        """
+                    )
         except psycopg.errors.UniqueViolation:
             pass  # Another worker already created the schema concurrently
 
@@ -696,6 +707,35 @@ class CoordinatorRepository:
                     (timeout_seconds,),
                 )
                 return cur.rowcount
+
+    def upsert_migration_table(self, table_name: str) -> None:
+        """Register a source table in migration_tables (idempotent)."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO migration_system.migration_tables (table_name, updated_at)
+                    VALUES (%s, NOW())
+                    ON CONFLICT (table_name) DO UPDATE SET updated_at = NOW()
+                    """,
+                    (table_name.upper(),),
+                )
+
+    def list_jobs_for_table(self, table_name: str) -> list[JobRecord]:
+        """Return all jobs (parent + children) for a source table, newest first."""
+        key = self._normalize_table_key(table_name)
+        if not key:
+            return []
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM migration_system.migration_jobs ORDER BY created_at DESC NULLS LAST",
+                )
+                rows = cur.fetchall()
+        return [
+            self._to_job(r) for r in rows
+            if self._normalize_table_key(r.get("table_name")) == key
+        ]
 
     @staticmethod
     def _normalize_table_key(table_name: str | None) -> str | None:

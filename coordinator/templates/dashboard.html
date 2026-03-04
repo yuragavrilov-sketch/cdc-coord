@@ -23,8 +23,32 @@
       @media (max-width: 900px) { .status-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
 
       /* Clickable rows */
-      tbody tr { cursor: pointer; transition: background 0.1s; }
-      tbody tr:hover { background: #f3f4f6; }
+      tbody tr.data-row { cursor: pointer; transition: background 0.1s; }
+      tbody tr.data-row:hover { background: #f3f4f6; }
+      tbody tr.data-row.expanded { background: #eff6ff; }
+      tbody tr.data-row.expanded:hover { background: #dbeafe; }
+
+      /* Expand indicator */
+      .expand-icon { display: inline-block; transition: transform .2s; font-size: 11px; margin-right: 4px; color: #6b7280; }
+      tr.expanded .expand-icon { transform: rotate(90deg); }
+
+      /* Expanded accordion row */
+      tr.accordion-row td { padding: 0; background: #f8fafc; border-bottom: 2px solid #c7d2fe; }
+      .accordion-content { padding: 16px 20px; }
+
+      /* Job cards inside accordion */
+      .jobs-grid { display: flex; flex-direction: column; gap: 12px; }
+      .job-card {
+        border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;
+        background: #fff;
+      }
+      .job-card-header {
+        display: flex; align-items: center; gap: 10px;
+        margin-bottom: 10px; flex-wrap: wrap;
+      }
+      .job-card-title { font-weight: 600; font-size: 14px; }
+      .job-card-subtitle { font-size: 12px; color: #6b7280; }
+      .job-card-header-actions { margin-left: auto; }
 
       /* Multi-select checkboxes */
       .multiselect-box {
@@ -70,7 +94,7 @@
       }
       .overlay.visible { opacity: 1; pointer-events: all; }
 
-      /* Side panel */
+      /* Side panel (create-job form only) */
       .side-panel {
         position: fixed; top: 0; right: 0; bottom: 0;
         width: 440px; max-width: 100vw;
@@ -91,7 +115,6 @@
         font-size: 20px; color: #6b7280; line-height: 1; padding: 2px 6px;
       }
       .btn-close:hover { color: #111; }
-
       .panel-body { padding: 20px; overflow-y: auto; flex: 1; }
 
       /* Create-job form */
@@ -103,7 +126,7 @@
         padding: 8px 10px; font-size: 14px; color: #1f2937;
       }
       .form-group input[readonly] { background: #f9fafb; color: #6b7280; }
-      .radio-group { display: flex; gap: 16px; margin-top: 4px; }
+      .radio-group { display: flex; gap: 16px; margin-top: 4px; flex-wrap: wrap; }
       .radio-group label { font-weight: 400; display: flex; align-items: center; gap: 6px; cursor: pointer; }
       .hint { font-weight: 400; color: #9ca3af; font-size: 12px; }
       .form-error { color: #991b1b; font-size: 13px; margin-bottom: 12px; padding: 8px 10px; background: #fee2e2; border-radius: 6px; white-space: pre-wrap; font-family: monospace; }
@@ -116,27 +139,27 @@
       .btn-primary:hover { background: #1e40af; }
       .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
       .btn-danger {
-        display: block; width: 100%; padding: 10px;
+        padding: 6px 14px;
         background: #fff; color: #991b1b; border: 1px solid #fca5a5; border-radius: 6px;
-        font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 8px;
+        font-size: 13px; font-weight: 600; cursor: pointer;
       }
       .btn-danger:hover { background: #fee2e2; }
       .btn-danger:disabled { opacity: .5; cursor: not-allowed; }
-      .warn-box { padding: 10px 12px; background: #fef3c7; color: #92400e; border-radius: 6px; font-size: 13px; margin-top: 12px; white-space: pre-wrap; }
+      .warn-box { padding: 10px 12px; background: #fef3c7; color: #92400e; border-radius: 6px; font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
 
-      /* Job-details */
-      .detail-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      /* Detail table inside job card */
+      .detail-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
       .detail-table tr { border-bottom: 1px solid #f3f4f6; }
-      .detail-table td { padding: 8px 4px; vertical-align: top; }
-      .detail-table td:first-child { color: #6b7280; width: 46%; font-weight: 500; white-space: nowrap; }
+      .detail-table td { padding: 6px 4px; vertical-align: top; }
+      .detail-table td:first-child { color: #6b7280; width: 40%; font-weight: 500; white-space: nowrap; }
       .detail-table td:last-child { word-break: break-all; }
-      .section-title { font-size: 12px; text-transform: uppercase; color: #9ca3af; font-weight: 600; margin: 20px 0 8px; letter-spacing: .05em; }
-      .loading { color: #6b7280; font-size: 14px; text-align: center; padding: 40px 0; }
+      .section-title { font-size: 11px; text-transform: uppercase; color: #9ca3af; font-weight: 600; margin: 12px 0 6px; letter-spacing: .05em; }
+      .loading { color: #6b7280; font-size: 14px; text-align: center; padding: 20px 0; }
 
-      /* Chunks table inside panel */
-      .chunks-summary { font-size: 12px; color: #4b5563; margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 12px; }
+      /* Chunks table inside accordion */
+      .chunks-summary { font-size: 12px; color: #4b5563; margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 12px; }
       .chunks-summary span { white-space: nowrap; }
-      .chunks-wrap { max-height: 320px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; }
+      .chunks-wrap { max-height: 260px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; }
       .chunks-table { width: 100%; border-collapse: collapse; font-size: 12px; }
       .chunks-table th { position: sticky; top: 0; background: #f9fafb; padding: 6px 8px; text-align: left; font-size: 11px; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
       .chunks-table td { padding: 6px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
@@ -169,7 +192,7 @@
       <div class="error">{{ source_tables_error }}</div>
       {% endif %}
 
-      <table>
+      <table id="main-table">
         <thead>
           <tr>
             <th>Source Table</th>
@@ -184,11 +207,14 @@
           {% if table_statuses %}
             {% for item in table_statuses %}
             <tr
+              class="data-row"
               data-source-table="{{ item.source_table }}"
               data-status="{{ item.status }}"
               data-job-id="{{ item.job_id }}"
             >
-              <td>{{ item.source_table }}</td>
+              <td>
+                <span class="expand-icon">&#9654;</span>{{ item.source_table }}
+              </td>
               <td>{{ item.target_table }}</td>
               <td>{{ item.mode }}</td>
               <td>
@@ -206,7 +232,7 @@
                 {% endif %}
               </td>
               <td class="progress-cell" id="progress-{{ item.job_id }}"><span class="muted">—</span></td>
-              <td class="muted">{{ item.job_id }}</td>
+              <td class="muted" style="font-size:11px;">{{ item.job_id }}</td>
             </tr>
             {% endfor %}
           {% else %}
@@ -218,10 +244,10 @@
       </table>
     </section>
 
-    <!-- Overlay -->
+    <!-- Overlay (create-job panel only) -->
     <div id="overlay" class="overlay"></div>
 
-    <!-- Side panel -->
+    <!-- Side panel (create-job form only) -->
     <div id="side-panel" class="side-panel" role="dialog" aria-modal="true">
       <div class="panel-header">
         <h2 id="panel-title"></h2>
@@ -237,10 +263,24 @@
         const STATUS_CLASSES = ["up", "down", "unknown", "degraded"];
         const NOT_MIGRATED = "не мигрирована";
 
-        /* ─── Service-status polling ─── */
-        function normalizeStatus(status) {
-          const value = String(status || "unknown").toLowerCase();
-          return STATUS_CLASSES.includes(value) ? value : "unknown";
+        /* ─── Utilities ─── */
+        function escHtml(str) {
+          return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function fmtDate(val) {
+          if (!val) return null;
+          try { return new Date(val).toLocaleString("ru-RU"); } catch { return String(val); }
+        }
+
+        function formatSpeed(rps) {
+          if (!rps && rps !== 0) return "—";
+          if (rps >= 1000) return (rps / 1000).toFixed(1) + "k rows/s";
+          return rps.toFixed(0) + " rows/s";
         }
 
         async function fetchJson(url) {
@@ -251,6 +291,20 @@
           });
           if (!response.ok) throw new Error("HTTP " + response.status + " for " + url);
           return response.json();
+        }
+
+        function buildErrorMessage(data) {
+          let msg = data.message || data.error || "Unknown error";
+          if (data.details && typeof data.details === "object" && Object.keys(data.details).length > 0) {
+            msg += "\n" + JSON.stringify(data.details, null, 2);
+          }
+          return msg;
+        }
+
+        /* ─── Service-status polling ─── */
+        function normalizeStatus(status) {
+          const value = String(status || "unknown").toLowerCase();
+          return STATUS_CLASSES.includes(value) ? value : "unknown";
         }
 
         function setStatus(serviceKey, payload) {
@@ -299,7 +353,7 @@
         refreshStatuses();
         setInterval(refreshStatuses, POLL_INTERVAL_MS);
 
-        /* ─── Panel helpers ─── */
+        /* ─── Side panel (create-job only) ─── */
         const overlay   = document.getElementById("overlay");
         const sidePanel = document.getElementById("side-panel");
         const panelTitle = document.getElementById("panel-title");
@@ -341,7 +395,12 @@
                 <div class="radio-group">
                   <label><input type="radio" name="mode" value="cdc" checked> CDC (live data)</label>
                   <label><input type="radio" name="mode" value="static"> STATIC (archived)</label>
+                  <label><input type="radio" name="mode" value="hybrid"> HYBRID (recent CDC + background static)</label>
                 </div>
+              </div>
+              <div id="recent-rows-group" class="form-group" style="display:none">
+                <label>Recent Rows <span class="hint">— строк для CDC-фазы (остальные → background static)</span></label>
+                <input type="text" id="f-recent-rows" placeholder="2000000">
               </div>
               <div class="form-group">
                 <label>Message Key Columns <span class="hint">— необязательно, если есть PK</span></label>
@@ -401,19 +460,19 @@
           }
         }
 
-        function buildErrorMessage(data) {
-          let msg = data.message || data.error || "Unknown error";
-          if (data.details && typeof data.details === "object" && Object.keys(data.details).length > 0) {
-            msg += "\n" + JSON.stringify(data.details, null, 2);
-          }
-          return msg;
-        }
-
         function bindCreateJobForm(sourceTable) {
           const form = document.getElementById("create-job-form");
           if (!form) return;
 
           loadColumns(sourceTable);
+
+          // Toggle recent-rows field visibility for hybrid mode
+          form.querySelectorAll("input[name=mode]").forEach(function (radio) {
+            radio.addEventListener("change", function () {
+              const recentGroup = document.getElementById("recent-rows-group");
+              if (recentGroup) recentGroup.style.display = radio.value === "hybrid" ? "block" : "none";
+            });
+          });
 
           form.addEventListener("submit", async function (e) {
             e.preventDefault();
@@ -422,6 +481,7 @@
             const source = document.getElementById("f-source").value.trim();
             const target = document.getElementById("f-target").value.trim();
             const mode   = form.querySelector("input[name=mode]:checked").value;
+            const recentRowsVal = document.getElementById("f-recent-rows") ? document.getElementById("f-recent-rows").value.trim() : "";
 
             const keyColumns = Array.from(
               form.querySelectorAll("input[name=key_col]:checked")
@@ -431,16 +491,21 @@
             btn.disabled = true;
             btn.textContent = "Creating…";
 
+            const body = {
+              table_name: source,
+              target_table_name: target || undefined,
+              migration_mode: mode,
+              message_key_columns: keyColumns.length ? keyColumns : null,
+            };
+            if (mode === "hybrid" && recentRowsVal) {
+              body.recent_rows = parseInt(recentRowsVal, 10);
+            }
+
             try {
               const resp = await fetch("/api/v1/jobs", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  table_name: source,
-                  target_table_name: target || undefined,
-                  migration_mode: mode,
-                  message_key_columns: keyColumns.length ? keyColumns : null,
-                }),
+                body: JSON.stringify(body),
               });
               const data = await resp.json();
               if (!resp.ok) {
@@ -461,7 +526,7 @@
           });
         }
 
-        /* ─── Job-details panel ─── */
+        /* ─── Badge helpers ─── */
         function statusBadgeHtml(status) {
           let cls = "badge-other";
           if (!status || status === NOT_MIGRATED) cls = "badge-none";
@@ -471,141 +536,6 @@
           return `<span class="badge ${cls}">${escHtml(status || "—")}</span>`;
         }
 
-        function row(label, value) {
-          return `<tr><td>${escHtml(label)}</td><td>${value == null || value === "" ? '<span class="muted">—</span>' : escHtml(String(value))}</td></tr>`;
-        }
-
-        function renderJobDetails(job) {
-          const isCdc = job.migration_mode === "cdc";
-
-          let html = `<table class="detail-table">`;
-
-          html += `<tr><td colspan="2" class="section-title">Основное</td></tr>`;
-          html += row("Job ID",       job.job_id);
-          html += row("Status",       "");
-          // inject badge directly
-          const statusTd = statusBadgeHtml(job.status);
-          html = html.replace(row("Status",       ""), `<tr><td>Status</td><td>${statusTd}</td></tr>`);
-          html += row("Mode",         job.migration_mode);
-          html += row("Source table", job.table_name);
-          html += row("Target table", job.target_table_name);
-          html += row("Created at",   fmtDate(job.created_at));
-          html += row("Completed at", fmtDate(job.completed_at));
-
-          if (isCdc) {
-            html += `<tr><td colspan="2" class="section-title">CDC</td></tr>`;
-            html += row("SCN cutoff",       job.scn_cutoff);
-            html += row("Catchup target",   job.catchup_target);
-            html += row("Connector name",   job.debezium_connector_name);
-            html += row("Kafka topic",      job.kafka_topic_name);
-            html += row("Consumer group",   job.consumer_group_name);
-            html += row("CDC owner worker", job.cdc_owner_worker_id);
-            html += row("CDC started at",   fmtDate(job.cdc_started_at));
-            html += row("CDC heartbeat",    fmtDate(job.cdc_heartbeat_at));
-          }
-
-          if (job.message_key_columns && job.message_key_columns.length) {
-            html += `<tr><td colspan="2" class="section-title">Key Columns</td></tr>`;
-            html += row("Key columns", job.message_key_columns.join(", "));
-          }
-
-          html += `</table>`;
-          return html;
-        }
-
-        async function openJobDetailsPanel(jobId, sourceTable) {
-          openPanel(sourceTable, '<div class="loading">Загрузка…</div>');
-          try {
-            const [job, chunksData] = await Promise.all([
-              fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId)),
-              fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks").catch(function () { return null; }),
-            ]);
-            let html = renderJobDetails(job);
-            if (chunksData) {
-              html += renderChunksSection(chunksData);
-            }
-            html += `<button class="btn-danger" id="btn-delete-job" data-job-id="${escHtml(jobId)}">Удалить job</button>`;
-            html += `<div id="delete-warn" class="warn-box" style="display:none"></div>`;
-            panelBody.innerHTML = html;
-            bindDeleteJobButton();
-          } catch (err) {
-            panelBody.innerHTML = `<div class="error">Не удалось загрузить job: ${escHtml(String(err.message || err))}</div>`;
-          }
-        }
-
-        function bindDeleteJobButton() {
-          const btn = document.getElementById("btn-delete-job");
-          if (!btn) return;
-          btn.addEventListener("click", async function () {
-            const jobId = btn.dataset.jobId;
-            if (!confirm("Удалить job " + jobId + "?\n\nЭто действие необратимо.")) return;
-            btn.disabled = true;
-            btn.textContent = "Удаляем…";
-            const warnEl = document.getElementById("delete-warn");
-            try {
-              const resp = await fetch("/api/v1/jobs/" + encodeURIComponent(jobId), { method: "DELETE" });
-              const data = await resp.json().catch(function () { return {}; });
-              if (!resp.ok) {
-                throw new Error(data.message || data.error || "HTTP " + resp.status);
-              }
-              if (data.debezium_warning) {
-                warnEl.textContent = "⚠ " + data.debezium_warning;
-                warnEl.style.display = "block";
-                btn.textContent = "Job удалён (см. предупреждение выше)";
-                setTimeout(function () { closePanel(); location.reload(); }, 5000);
-              } else {
-                closePanel();
-                location.reload();
-              }
-            } catch (err) {
-              btn.disabled = false;
-              btn.textContent = "Удалить job";
-              warnEl.textContent = "Ошибка: " + String(err.message || err);
-              warnEl.style.display = "block";
-            }
-          });
-        }
-
-        /* ─── Row click handler ─── */
-        document.querySelector("tbody").addEventListener("click", function (e) {
-          const tr = e.target.closest("tr[data-source-table]");
-          if (!tr) return;
-
-          const sourceTable = tr.dataset.sourceTable;
-          const status      = tr.dataset.status;
-          const jobId       = tr.dataset.jobId;
-
-          if (status === NOT_MIGRATED || !jobId || jobId === "—") {
-            // Open create-job form
-            openPanel("Создать Job — " + sourceTable, renderCreateJobForm(sourceTable));
-            bindCreateJobForm(sourceTable);
-          } else {
-            // Open job details
-            openJobDetailsPanel(jobId, sourceTable);
-          }
-        });
-
-        /* ─── Utilities ─── */
-        function escHtml(str) {
-          return String(str)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;");
-        }
-
-        function fmtDate(val) {
-          if (!val) return null;
-          try { return new Date(val).toLocaleString("ru-RU"); } catch { return String(val); }
-        }
-
-        function formatSpeed(rps) {
-          if (!rps && rps !== 0) return "—";
-          if (rps >= 1000) return (rps / 1000).toFixed(1) + "k rows/s";
-          return rps.toFixed(0) + " rows/s";
-        }
-
-        /* ─── Chunk badge ─── */
         function chunkBadgeHtml(status) {
           let cls = "badge-other";
           if (status === "completed")            cls = "badge-done";
@@ -615,16 +545,27 @@
           return `<span class="badge ${cls}">${escHtml(status || "—")}</span>`;
         }
 
+        function detailRow(label, value) {
+          const val = (value == null || value === "")
+            ? '<span class="muted">—</span>'
+            : escHtml(String(value));
+          return `<tr><td>${escHtml(label)}</td><td>${val}</td></tr>`;
+        }
+
         /* ─── Chunks table renderer ─── */
         function renderChunksSection(chunksData) {
-          const stats  = chunksData.stats  || {};
+          const stats  = chunksData.stats  || chunksData._chunk_stats || {};
           const chunks = chunksData.chunks || [];
 
           let html = `<div class="section-title">Чанки</div>`;
 
           if (chunks.length === 0) {
-            html += `<p class="muted" style="font-size:13px;">Чанки не созданы</p>`;
-            return html;
+            const byStatus = stats.by_status || {};
+            const total = stats.total || 0;
+            if (total === 0) {
+              html += `<p class="muted" style="font-size:13px;">Чанки не созданы</p>`;
+              return html;
+            }
           }
 
           const by = stats.by_status || {};
@@ -643,6 +584,8 @@
             <span>Строк: <strong>${rows}</strong></span>
             <span>Ср. скорость: <strong>${speed}</strong></span>
           </div>`;
+
+          if (chunks.length === 0) return html;
 
           html += `<div class="chunks-wrap"><table class="chunks-table">
             <thead><tr>
@@ -677,9 +620,214 @@
           return html;
         }
 
+        /* ─── Job card renderer ─── */
+        function renderJobCard(job, index, total) {
+          const isCdc = job.migration_mode === "cdc";
+          const isChild = !!job.parent_job_id;
+
+          let cardLabel = isCdc ? "CDC" : "Static";
+          if (isChild) cardLabel += " (background)";
+          if (total > 1) cardLabel = (index === 0 ? "Основной — " : "Дочерний — ") + cardLabel;
+
+          let html = `<div class="job-card" data-job-id="${escHtml(job.job_id)}">`;
+          html += `<div class="job-card-header">`;
+          html += `<span class="job-card-title">${escHtml(cardLabel)}</span>`;
+          html += statusBadgeHtml(job.status);
+          html += `<span class="job-card-subtitle">${escHtml(job.job_id)}</span>`;
+          html += `<div class="job-card-header-actions">
+            <button class="btn-danger btn-delete-job" data-job-id="${escHtml(job.job_id)}">Удалить</button>
+          </div>`;
+          html += `</div>`;
+
+          html += `<table class="detail-table">`;
+          html += detailRow("Mode",         job.migration_mode);
+          html += detailRow("Source table", job.table_name);
+          html += detailRow("Target table", job.target_table_name);
+          html += detailRow("Created at",   fmtDate(job.created_at));
+          html += detailRow("Completed at", fmtDate(job.completed_at));
+
+          if (isCdc) {
+            html += `<tr><td colspan="2" class="section-title">CDC</td></tr>`;
+            html += detailRow("SCN cutoff",       job.scn_cutoff);
+            html += detailRow("Catchup target",   job.catchup_target);
+            html += detailRow("Connector name",   job.debezium_connector_name);
+            html += detailRow("Kafka topic",      job.kafka_topic_name);
+            html += detailRow("Consumer group",   job.consumer_group_name);
+            html += detailRow("CDC owner worker", job.cdc_owner_worker_id);
+            html += detailRow("CDC started at",   fmtDate(job.cdc_started_at));
+            html += detailRow("CDC heartbeat",    fmtDate(job.cdc_heartbeat_at));
+          }
+
+          if (job.message_key_columns && job.message_key_columns.length) {
+            html += detailRow("Key columns", job.message_key_columns.join(", "));
+          }
+
+          html += `</table>`;
+
+          // Chunk stats (from _chunk_stats embedded in table jobs response)
+          if (job._chunk_stats) {
+            html += renderChunksSection({ stats: job._chunk_stats, chunks: [] });
+            // Add link to load full chunk list
+            html += `<a href="#" class="load-chunks-link" data-job-id="${escHtml(job.job_id)}" style="font-size:12px;color:#1d4ed8;">Показать все чанки…</a>`;
+            html += `<div class="chunks-detail" data-job-id="${escHtml(job.job_id)}" style="display:none;margin-top:8px;"></div>`;
+          }
+
+          html += `<div class="delete-warn warn-box" data-job-id="${escHtml(job.job_id)}" style="display:none;margin-top:8px;"></div>`;
+          html += `</div>`;  // .job-card
+          return html;
+        }
+
+        /* ─── Accordion (inline expansion) ─── */
+        const expandedRows = new Map();  // sourceTable → accordion <tr>
+
+        function getAccordionRow(dataRow) {
+          const sourceTable = dataRow.dataset.sourceTable;
+          return expandedRows.get(sourceTable) || null;
+        }
+
+        function removeAccordionRow(dataRow) {
+          const sourceTable = dataRow.dataset.sourceTable;
+          const existing = expandedRows.get(sourceTable);
+          if (existing) {
+            existing.remove();
+            expandedRows.delete(sourceTable);
+          }
+          dataRow.classList.remove("expanded");
+        }
+
+        async function openAccordion(dataRow) {
+          const sourceTable = dataRow.dataset.sourceTable;
+
+          // If already expanded, collapse
+          if (getAccordionRow(dataRow)) {
+            removeAccordionRow(dataRow);
+            return;
+          }
+
+          // Insert accordion row
+          const accordionTr = document.createElement("tr");
+          accordionTr.className = "accordion-row";
+          const td = document.createElement("td");
+          td.colSpan = 6;
+          td.innerHTML = `<div class="accordion-content"><div class="loading">Загрузка данных о jobs…</div></div>`;
+          accordionTr.appendChild(td);
+          dataRow.after(accordionTr);
+          expandedRows.set(sourceTable, accordionTr);
+          dataRow.classList.add("expanded");
+
+          try {
+            const data = await fetchJson("/api/v1/tables/" + encodeURIComponent(sourceTable) + "/jobs");
+            const jobs = data.items || [];
+
+            if (jobs.length === 0) {
+              td.querySelector(".accordion-content").innerHTML = `<p class="muted">Нет jobs для этой таблицы</p>`;
+              return;
+            }
+
+            let html = `<div class="jobs-grid">`;
+            jobs.forEach(function (job, idx) {
+              html += renderJobCard(job, idx, jobs.length);
+            });
+            html += `</div>`;
+            td.querySelector(".accordion-content").innerHTML = html;
+
+            // Bind delete buttons
+            accordionTr.querySelectorAll(".btn-delete-job").forEach(function (btn) {
+              btn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                bindDeleteJob(btn, dataRow);
+              });
+            });
+
+            // Bind "load chunks" links
+            accordionTr.querySelectorAll(".load-chunks-link").forEach(function (link) {
+              link.addEventListener("click", async function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const jobId = link.dataset.jobId;
+                const detailDiv = accordionTr.querySelector(`.chunks-detail[data-job-id="${jobId}"]`);
+                if (!detailDiv) return;
+                if (detailDiv.style.display !== "none") {
+                  detailDiv.style.display = "none";
+                  link.textContent = "Показать все чанки…";
+                  return;
+                }
+                link.textContent = "Загрузка…";
+                try {
+                  const chunksData = await fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks");
+                  detailDiv.innerHTML = renderChunksSection(chunksData);
+                  detailDiv.style.display = "block";
+                  link.textContent = "Скрыть чанки";
+                } catch (err) {
+                  detailDiv.innerHTML = `<p style="color:#991b1b;font-size:12px;">Ошибка: ${escHtml(String(err.message || err))}</p>`;
+                  detailDiv.style.display = "block";
+                  link.textContent = "Показать все чанки…";
+                }
+              });
+            });
+
+          } catch (err) {
+            td.querySelector(".accordion-content").innerHTML =
+              `<p style="color:#991b1b;">Не удалось загрузить jobs: ${escHtml(String(err.message || err))}</p>`;
+          }
+        }
+
+        function bindDeleteJob(btn, dataRow) {
+          const jobId = btn.dataset.jobId;
+          if (!confirm("Удалить job " + jobId + "?\n\nЭто действие необратимо.")) return;
+          btn.disabled = true;
+          btn.textContent = "Удаляем…";
+          const warnEl = dataRow.parentElement.querySelector(`.delete-warn[data-job-id="${jobId}"]`);
+
+          fetch("/api/v1/jobs/" + encodeURIComponent(jobId), { method: "DELETE" })
+            .then(function (resp) { return resp.json().then(function (d) { return { resp, d }; }); })
+            .then(function ({ resp, d }) {
+              if (!resp.ok) throw new Error(d.message || d.error || "HTTP " + resp.status);
+              if (d.debezium_warning && warnEl) {
+                warnEl.textContent = "⚠ " + d.debezium_warning;
+                warnEl.style.display = "block";
+                btn.textContent = "Удалён";
+                setTimeout(function () { removeAccordionRow(dataRow); location.reload(); }, 5000);
+              } else {
+                removeAccordionRow(dataRow);
+                location.reload();
+              }
+            })
+            .catch(function (err) {
+              btn.disabled = false;
+              btn.textContent = "Удалить";
+              if (warnEl) {
+                warnEl.textContent = "Ошибка: " + String(err.message || err);
+                warnEl.style.display = "block";
+              }
+            });
+        }
+
+        /* ─── Row click handler ─── */
+        document.querySelector("tbody").addEventListener("click", function (e) {
+          // Ignore clicks on buttons/links inside accordion rows
+          if (e.target.closest(".accordion-row")) return;
+
+          const tr = e.target.closest("tr.data-row");
+          if (!tr) return;
+
+          const sourceTable = tr.dataset.sourceTable;
+          const status      = tr.dataset.status;
+          const jobId       = tr.dataset.jobId;
+
+          if (status === NOT_MIGRATED || !jobId || jobId === "—") {
+            // Open create-job side panel
+            openPanel("Создать Job — " + sourceTable, renderCreateJobForm(sourceTable));
+            bindCreateJobForm(sourceTable);
+          } else {
+            // Toggle inline accordion with job details
+            openAccordion(tr);
+          }
+        });
+
         /* ─── Chunk stats in jobs list ─── */
         async function loadAllChunkStats() {
-          const rows = document.querySelectorAll("tbody tr[data-job-id]");
+          const rows = document.querySelectorAll("tbody tr.data-row[data-job-id]");
           const promises = [];
           rows.forEach(function (tr) {
             const jobId = tr.dataset.jobId;
