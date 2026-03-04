@@ -101,6 +101,15 @@ def _build_bulk_merge_sql(table_name: str, columns: list[str], pk_columns: list[
     )
 
 
+def _build_bulk_insert_sql(table_name: str, columns: list[str]) -> str:
+    """Plain INSERT for bulk load — use with executemany(batcherrors=True) for idempotency.
+    Much faster than MERGE-via-DUAL: Oracle can apply array-INSERT optimisation."""
+    qualified = _qualified_table(table_name)
+    insert_cols = ", ".join(f'"{c}"' for c in columns)
+    insert_vals = ", ".join(f':{c}' for c in columns)
+    return f"INSERT INTO {qualified} ({insert_cols}) VALUES ({insert_vals})"
+
+
 def _build_cdc_merge_sql(table_name: str, columns: list[str], pk_columns: list[str]) -> str:
     """Full MERGE (update existing + insert new) for CDC apply."""
     qualified = _qualified_table(table_name)
@@ -190,30 +199,32 @@ class BulkChunkProcessor:
         select_sql, select_params = _build_source_select(
             source_table, insertable_cols, scn_cutoff, start_rowid, end_rowid
         )
-        merge_sql = _build_bulk_merge_sql(target_table, insertable_cols, pk_cols)
+        insert_sql = _build_bulk_insert_sql(target_table, insertable_cols)
 
         src_dsn, src_user, src_pwd = _source_cfg(self._config)
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
         rows_processed = 0
+        batch_size = self._config.worker_bulk_batch_size
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn:
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
                 with src_conn.cursor() as src_cur:
+                    src_cur.arraysize = batch_size
                     src_cur.execute(select_sql, select_params)
                     col_names = [d[0].upper() for d in src_cur.description]
-                    while True:
-                        rows = src_cur.fetchmany(self._config.worker_bulk_batch_size)
-                        if not rows:
-                            break
-                        batch = [dict(zip(col_names, row)) for row in rows]
-                        with tgt_conn.cursor() as tgt_cur:
-                            tgt_cur.executemany(merge_sql, batch)
-                        tgt_conn.commit()
-                        rows_processed += len(batch)
-                        logger.debug(
-                            "Bulk batch applied",
-                            extra={"chunk_id": str(chunk["chunk_id"]), "batch": len(batch), "total": rows_processed},
-                        )
+                    with tgt_conn.cursor() as tgt_cur:
+                        while True:
+                            rows = src_cur.fetchmany(batch_size)
+                            if not rows:
+                                break
+                            batch = [dict(zip(col_names, row)) for row in rows]
+                            tgt_cur.executemany(insert_sql, batch, batcherrors=True)
+                            tgt_conn.commit()
+                            rows_processed += len(batch)
+                            logger.debug(
+                                "Bulk batch applied",
+                                extra={"chunk_id": str(chunk["chunk_id"]), "batch": len(batch), "total": rows_processed},
+                            )
 
         return rows_processed
 
