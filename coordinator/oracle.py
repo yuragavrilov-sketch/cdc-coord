@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -297,12 +298,31 @@ class OracleIntrospector:
                 details={"nullable_columns": invalid_nullable},
             )
 
-    def build_rowid_chunks(self, table_name: str, chunk_count: int) -> list[RowIdChunk]:
+    def build_rowid_chunks(self, table_name: str, chunk_size: int) -> list[RowIdChunk]:
         if not self._source:
             raise ValidationError("Oracle source connection is not configured")
 
         schema, table = _resolve_table_name(table_name, self._source_schema)
         qualified_table = _qualified_table_name(schema, table)
+
+        # Estimate row count from Oracle CBO statistics (fast, no full scan)
+        approx_rows = self._get_approx_row_count(schema, table)
+        if approx_rows > 0:
+            chunk_count = max(1, math.ceil(approx_rows / chunk_size))
+        else:
+            # Stats not collected — fall back to a single chunk and warn
+            logger.warning(
+                "No row count statistics for %s.%s; creating 1 chunk. "
+                "Run DBMS_STATS.GATHER_TABLE_STATS to populate statistics.",
+                schema, table,
+            )
+            chunk_count = 1
+
+        logger.info(
+            "Chunking %s.%s: ~%d rows → %d chunks (chunk_size=%d)",
+            schema, table, approx_rows, chunk_count, chunk_size,
+        )
+
         query = """
             SELECT MIN(rid), MAX(rid)
             FROM (
@@ -317,11 +337,24 @@ class OracleIntrospector:
         chunks: list[RowIdChunk] = []
         with self._connect(self._source) as conn:
             with conn.cursor() as cur:
-                cur.execute(query, chunk_count=max(1, chunk_count))
+                cur.execute(query, chunk_count=chunk_count)
                 for start_rowid, end_rowid in cur.fetchall():
                     chunks.append(RowIdChunk(start_rowid=start_rowid, end_rowid=end_rowid))
 
         if not chunks:
             chunks.append(RowIdChunk(start_rowid=None, end_rowid=None))
         return chunks
+
+    def _get_approx_row_count(self, schema: str, table: str) -> int:
+        """Return num_rows from Oracle CBO statistics. Returns 0 if stats are absent."""
+        with self._connect(self._source) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT num_rows FROM all_tables"
+                    " WHERE owner = :owner AND table_name = :table_name",
+                    owner=schema,
+                    table_name=table,
+                )
+                row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 

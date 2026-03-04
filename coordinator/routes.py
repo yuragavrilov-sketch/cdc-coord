@@ -81,7 +81,7 @@ def build_api_blueprint(
             migration_mode=migration_mode,
             message_key_columns=key_columns or None,
             idempotency_key=request.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
-            chunk_count=payload.get("chunk_count"),
+            chunk_size=payload.get("chunk_size"),
         )
         job = service.create_job(create_request)
         return jsonify(job.to_dict()), 201

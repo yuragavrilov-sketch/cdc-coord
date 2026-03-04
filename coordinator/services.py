@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -53,7 +54,7 @@ class CreateJobRequest:
     migration_mode: str
     message_key_columns: list[str] | None
     idempotency_key: str | None
-    chunk_count: int | None
+    chunk_size: int | None
 
 
 class CoordinatorService:
@@ -99,7 +100,7 @@ class CoordinatorService:
             request.target_table_name or request.table_name,
             self._config.oracle_target_schema,
         )
-        chunk_count = request.chunk_count or self._config.default_chunk_count
+        chunk_size = request.chunk_size or self._config.default_chunk_size
         metadata = self._oracle.fetch_table_metadata(target_table)
 
         key_columns = self._resolve_key_columns(
@@ -117,7 +118,7 @@ class CoordinatorService:
                 metadata=metadata,
                 key_columns=key_columns,
                 idempotency_key=request.idempotency_key,
-                chunk_count=chunk_count,
+                chunk_size=chunk_size,
             )
 
         return self._create_static_job(
@@ -126,7 +127,7 @@ class CoordinatorService:
             metadata=metadata,
             key_columns=key_columns,
             idempotency_key=request.idempotency_key,
-            chunk_count=chunk_count,
+            chunk_size=chunk_size,
         )
 
     def get_job(self, job_id: str) -> JobRecord:
@@ -191,7 +192,7 @@ class CoordinatorService:
         metadata: OracleTableMetadata,
         key_columns: list[str],
         idempotency_key: str | None,
-        chunk_count: int,
+        chunk_size: int,
     ) -> JobRecord:
         job_id = str(uuid.uuid4())
         scn_cutoff = self._oracle.read_current_scn()
@@ -206,6 +207,7 @@ class CoordinatorService:
             source_table=source_table,
             source_schema=source_schema,
             source_table_only=source_table_only,
+            topic_name=topic_name,
             scn_cutoff=scn_cutoff,
             key_columns=key_columns,
             metadata=metadata,
@@ -243,7 +245,7 @@ class CoordinatorService:
             poll_interval_seconds=self._config.monitor_connector_poll_interval_seconds,
         )
 
-        chunks = self._oracle.build_rowid_chunks(source_table, chunk_count)
+        chunks = self._oracle.build_rowid_chunks(source_table, chunk_size)
         self._repository.save_chunks(job.job_id, source_table, chunks)
         return self._repository.update_job_status(job.job_id, "bulk_running")
 
@@ -255,7 +257,7 @@ class CoordinatorService:
         metadata: OracleTableMetadata,
         key_columns: list[str],
         idempotency_key: str | None,
-        chunk_count: int,
+        chunk_size: int,
     ) -> JobRecord:
         job = self._repository.create_job(
             job_id=None,
@@ -281,7 +283,7 @@ class CoordinatorService:
         )
         self._repository.save_sql_templates(sql_templates)
 
-        chunks = self._oracle.build_rowid_chunks(source_table, chunk_count)
+        chunks = self._oracle.build_rowid_chunks(source_table, chunk_size)
         self._repository.save_chunks(job.job_id, source_table, chunks)
         return self._repository.update_job_status(job.job_id, "bulk_running")
 
@@ -299,14 +301,33 @@ class CoordinatorService:
         source_table: str,
         source_schema: str,
         source_table_only: str,
+        topic_name: str,
         scn_cutoff: int,
         key_columns: list[str],
         metadata: OracleTableMetadata,
     ) -> dict[str, Any]:
+        topic_prefix = self._config.topic_prefix
+        # Java regex matching the default Debezium topic for this table so the
+        # route transform can redirect it to our job-specific topic_name.
+        default_topic_regex = (
+            "^"
+            + re.escape(topic_prefix)
+            + "\\."
+            + re.escape(source_schema)
+            + "\\."
+            + re.escape(source_table_only)
+            + "$"
+        )
         cfg_updates: dict[str, Any] = {
             "name": connector_name,
             "table.include.list": f"{source_schema}.{source_table_only}",
+            "schema.include.list": source_schema,
             "log.mining.start.scn": str(scn_cutoff),
+            "schema.history.internal.kafka.topic": (
+                f"{self._config.debezium_schema_history_topic_prefix}.{connector_name}"
+            ),
+            "transforms.route.topic.regex": default_topic_regex,
+            "transforms.route.topic.replacement": topic_name,
         }
         if not metadata.pk_columns and key_columns:
             cfg_updates["message.key.columns"] = f"{source_table}:{','.join(key_columns)}"

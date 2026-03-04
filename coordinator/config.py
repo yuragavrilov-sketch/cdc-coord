@@ -67,12 +67,13 @@ class AppConfig:
     postgres_dsn: str
     debezium_connect_url: str
     debezium_connector_template: dict[str, str] = field(default_factory=dict)
+    debezium_schema_history_topic_prefix: str = "migration.schema-history"
     topic_prefix: str = "migration"
     log_level: str = "INFO"
     monitor_heartbeat_timeout_seconds: int = 120
     monitor_connector_start_timeout_seconds: int = 60
     monitor_connector_poll_interval_seconds: int = 2
-    default_chunk_count: int = 64
+    default_chunk_size: int = 100_000
     oracle_source_dsn: str | None = None
     oracle_source_user: str | None = None
     oracle_source_password: str | None = None
@@ -97,30 +98,71 @@ class AppConfig:
         source_schema = normalize_oracle_schema(os.getenv("ORACLE_SOURCE_SCHEMA"), fallback_user=source_user)
         target_schema = normalize_oracle_schema(os.getenv("ORACLE_TARGET_SCHEMA"), fallback_user=target_user)
 
+        topic_prefix = os.getenv("TOPIC_PREFIX", "migration")
+        kafka_bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        schema_history_prefix = os.getenv("DEBEZIUM_SCHEMA_HISTORY_TOPIC_PREFIX", "migration.schema-history")
+        lob_enabled = os.getenv("DEBEZIUM_LOB_ENABLED", "false").lower() in {"true", "1", "yes"}
+
         template = {
             "connector.class": "io.debezium.connector.oracle.OracleConnector",
             "tasks.max": "1",
             "snapshot.mode": "no_data",
+            "snapshot.locking.mode": "none",
             "log.mining.strategy": "online_catalog",
+            "database.connection.adapter": "logminer",
+            "log.mining.continuous.mine": "true",
             "heartbeat.interval.ms": "30000",
-            "topic.prefix": os.getenv("TOPIC_PREFIX", "migration"),
+            "topic.prefix": topic_prefix,
             "database.hostname": os.getenv("ORACLE_SOURCE_HOST", ""),
             "database.port": os.getenv("ORACLE_SOURCE_PORT", "1521"),
             "database.user": source_user or "",
             "database.password": os.getenv("ORACLE_SOURCE_PASSWORD", ""),
             "database.dbname": os.getenv("ORACLE_SOURCE_SERVICE", ""),
+            # Topic auto-creation
+            "topic.creation.default.replication.factor": os.getenv("DEBEZIUM_TOPIC_REPLICATION_FACTOR", "1"),
+            "topic.creation.default.partitions": os.getenv("DEBEZIUM_TOPIC_PARTITIONS", "1"),
+            "topic.creation.default.cleanup.policy": os.getenv("DEBEZIUM_TOPIC_CLEANUP_POLICY", "delete"),
+            "topic.creation.default.retention.ms": os.getenv("DEBEZIUM_TOPIC_RETENTION_MS", "604800000"),
+            "topic.creation.default.compression.type": os.getenv("DEBEZIUM_TOPIC_COMPRESSION_TYPE", "snappy"),
+            # LOB handling
+            "lob.enabled": "true" if lob_enabled else "false",
+            "lob.fetch.size": os.getenv("DEBEZIUM_LOB_FETCH_SIZE", "0"),
+            "lob.fetch.buffer.size": os.getenv("DEBEZIUM_LOB_FETCH_BUFFER_SIZE", "0"),
+            # Schema history (per-connector topic added in _build_debezium_config)
+            "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap,
+            "include.schema.changes": "false",
+            # Message converters
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "true",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "true",
+            # Type handling
+            "decimal.handling.mode": "double",
+            "time.precision.mode": "connect",
+            # Misc
+            "provide.transaction.metadata": "false",
+            "tombstones.on.delete": "true",
+            "skipped.operations": "none",
+            # Transforms: unwrap is static; route regex/replacement are per-connector
+            "transforms": "unwrap,route",
+            "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+            "transforms.unwrap.delete.handling.mode": "rewrite",
+            "transforms.unwrap.add.fields": "op,table,source.ts_ms",
+            "transforms.unwrap.add.fields.prefix": "__",
+            "transforms.route.type": "io.debezium.transforms.ByLogicalTableRouter",
         }
 
         return cls(
             postgres_dsn=os.getenv("POSTGRES_DSN", "postgresql://postgres:postgres@localhost:5432/postgres"),
             debezium_connect_url=os.getenv("DEBEZIUM_CONNECT_URL", "http://localhost:8083"),
             debezium_connector_template=template,
-            topic_prefix=os.getenv("TOPIC_PREFIX", "migration"),
+            debezium_schema_history_topic_prefix=schema_history_prefix,
+            topic_prefix=topic_prefix,
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             monitor_heartbeat_timeout_seconds=int(os.getenv("CDC_HEARTBEAT_TIMEOUT_SECONDS", "120")),
             monitor_connector_start_timeout_seconds=int(os.getenv("CONNECTOR_START_TIMEOUT_SECONDS", "60")),
             monitor_connector_poll_interval_seconds=int(os.getenv("CONNECTOR_POLL_INTERVAL_SECONDS", "2")),
-            default_chunk_count=int(os.getenv("DEFAULT_CHUNK_COUNT", "64")),
+            default_chunk_size=int(os.getenv("DEFAULT_CHUNK_SIZE", "100000")),
             oracle_source_dsn=os.getenv("ORACLE_SOURCE_DSN"),
             oracle_source_user=source_user,
             oracle_source_password=os.getenv("ORACLE_SOURCE_PASSWORD"),
@@ -129,7 +171,7 @@ class AppConfig:
             oracle_target_user=target_user,
             oracle_target_password=os.getenv("ORACLE_TARGET_PASSWORD"),
             oracle_target_schema=target_schema,
-            kafka_bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+            kafka_bootstrap_servers=kafka_bootstrap,
             worker_bulk_batch_size=int(os.getenv("WORKER_BULK_BATCH_SIZE", "1000")),
             worker_cdc_batch_size=int(os.getenv("WORKER_CDC_BATCH_SIZE", "500")),
             worker_poll_interval_seconds=int(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "5")),
