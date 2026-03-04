@@ -215,8 +215,9 @@ class BulkChunkProcessor:
                     t0 = time.monotonic()
                     src_cur.execute(select_sql, select_params)
                     logger.info(
-                        "Bulk SELECT executed",
-                        extra={"chunk_id": chunk_id_str, "elapsed_ms": round((time.monotonic() - t0) * 1000)},
+                        "Bulk SELECT executed: elapsed_ms=%d",
+                        round((time.monotonic() - t0) * 1000),
+                        extra={"chunk_id": chunk_id_str},
                     )
                     with tgt_conn.cursor() as tgt_cur:
                         batch_no = 0
@@ -235,16 +236,9 @@ class BulkChunkProcessor:
                             commit_ms = round((time.monotonic() - t_commit) * 1000)
                             rows_processed += len(rows)
                             logger.info(
-                                "Bulk batch applied",
-                                extra={
-                                    "chunk_id": chunk_id_str,
-                                    "batch": batch_no,
-                                    "rows": len(rows),
-                                    "total": rows_processed,
-                                    "fetch_ms": fetch_ms,
-                                    "insert_ms": insert_ms,
-                                    "commit_ms": commit_ms,
-                                },
+                                "Bulk batch applied: batch=%d rows=%d total=%d fetch_ms=%d insert_ms=%d commit_ms=%d",
+                                batch_no, len(rows), rows_processed, fetch_ms, insert_ms, commit_ms,
+                                extra={"chunk_id": chunk_id_str},
                             )
 
         return rows_processed
