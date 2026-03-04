@@ -103,10 +103,10 @@ def _build_bulk_merge_sql(table_name: str, columns: list[str], pk_columns: list[
 
 def _build_bulk_insert_sql(table_name: str, columns: list[str]) -> str:
     """Plain INSERT for bulk load — use with executemany(batcherrors=True) for idempotency.
-    Much faster than MERGE-via-DUAL: Oracle can apply array-INSERT optimisation."""
+    Positional binds (:1,:2,...) + tuple rows avoids per-row dict creation overhead."""
     qualified = _qualified_table(table_name)
     insert_cols = ", ".join(f'"{c}"' for c in columns)
-    insert_vals = ", ".join(f':{c}' for c in columns)
+    insert_vals = ", ".join(f":{i + 1}" for i in range(len(columns)))
     return f"INSERT INTO {qualified} ({insert_cols}) VALUES ({insert_vals})"
 
 
@@ -210,20 +210,19 @@ class BulkChunkProcessor:
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
                 with src_conn.cursor() as src_cur:
                     src_cur.arraysize = batch_size
+                    src_cur.prefetchrows = batch_size
                     src_cur.execute(select_sql, select_params)
-                    col_names = [d[0].upper() for d in src_cur.description]
                     with tgt_conn.cursor() as tgt_cur:
                         while True:
                             rows = src_cur.fetchmany(batch_size)
                             if not rows:
                                 break
-                            batch = [dict(zip(col_names, row)) for row in rows]
-                            tgt_cur.executemany(insert_sql, batch, batcherrors=True)
+                            tgt_cur.executemany(insert_sql, rows, batcherrors=True)
                             tgt_conn.commit()
-                            rows_processed += len(batch)
+                            rows_processed += len(rows)
                             logger.debug(
                                 "Bulk batch applied",
-                                extra={"chunk_id": str(chunk["chunk_id"]), "batch": len(batch), "total": rows_processed},
+                                extra={"chunk_id": str(chunk["chunk_id"]), "batch": len(rows), "total": rows_processed},
                             )
 
         return rows_processed
