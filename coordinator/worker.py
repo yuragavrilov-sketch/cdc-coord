@@ -201,11 +201,6 @@ class BulkChunkProcessor:
         )
         insert_sql = _build_bulk_insert_sql(target_table, insertable_cols)
 
-        try:
-            import oracledb as _oracledb
-        except ImportError as exc:
-            raise ExternalServiceError("oracledb package is required for worker") from exc
-
         src_dsn, src_user, src_pwd = _source_cfg(self._config)
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
         rows_processed = 0
@@ -213,6 +208,8 @@ class BulkChunkProcessor:
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn:
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
+                with tgt_conn.cursor() as _cur:
+                    _cur.execute("ALTER SESSION SET SKIP_UNUSABLE_INDEXES = TRUE")
                 chunk_id_str = str(chunk["chunk_id"])
                 with src_conn.cursor() as src_cur:
                     src_cur.arraysize = batch_size
@@ -234,16 +231,7 @@ class BulkChunkProcessor:
                                 break
                             batch_no += 1
                             t_insert = time.monotonic()
-                            try:
-                                # Fast path: true array INSERT — no per-row error tracking
-                                tgt_cur.executemany(insert_sql, rows)
-                            except _oracledb.IntegrityError:
-                                # Fallback for re-runs: ignore duplicate key per row
-                                logger.debug(
-                                    "Bulk batch has duplicates, retrying with batcherrors",
-                                    extra={"chunk_id": chunk_id_str, "batch": batch_no},
-                                )
-                                tgt_cur.executemany(insert_sql, rows, batcherrors=True)
+                            tgt_cur.executemany(insert_sql, rows, batcherrors=True)
                             insert_ms = round((time.monotonic() - t_insert) * 1000)
                             t_commit = time.monotonic()
                             tgt_conn.commit()
