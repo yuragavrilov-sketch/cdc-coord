@@ -216,59 +216,6 @@ def _materialize_lob_batch(
 
 
 # ---------------------------------------------------------------------------
-# Oracle index management helpers
-# ---------------------------------------------------------------------------
-
-
-def _disable_target_nonunique_indexes(conn: Any, schema: str, table: str) -> None:
-    """Mark all non-unique indexes on target table as UNUSABLE (idempotent, fast)."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT index_name FROM all_indexes
-            WHERE table_owner = :owner AND table_name = :tbl
-              AND uniqueness = 'NONUNIQUE' AND status != 'UNUSABLE'
-            """,
-            owner=schema,
-            tbl=table,
-        )
-        names = [row[0] for row in cur.fetchall()]
-
-    if not names:
-        return
-    for name in names:
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f'ALTER INDEX "{schema}"."{name}" UNUSABLE')
-        except Exception as exc:
-            logger.warning("Cannot disable index %s.%s: %s", schema, name, exc)
-    logger.info("Disabled non-unique indexes on %s.%s: %s", schema, table, names)
-
-
-def _rebuild_target_unusable_indexes(conn: Any, schema: str, table: str) -> None:
-    """Rebuild all UNUSABLE indexes on target table after bulk load."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT index_name FROM all_indexes
-            WHERE table_owner = :owner AND table_name = :tbl AND status = 'UNUSABLE'
-            """,
-            owner=schema,
-            tbl=table,
-        )
-        names = [row[0] for row in cur.fetchall()]
-
-    for name in names:
-        try:
-            t0 = time.monotonic()
-            with conn.cursor() as cur:
-                cur.execute(f'ALTER INDEX "{schema}"."{name}" REBUILD NOLOGGING')
-            logger.info("Rebuilt index %s.%s in %ds", schema, name, round(time.monotonic() - t0))
-        except Exception as exc:
-            logger.warning("Cannot rebuild index %s.%s: %s", schema, name, exc)
-
-
-# ---------------------------------------------------------------------------
 # BulkChunkProcessor
 # ---------------------------------------------------------------------------
 
@@ -294,10 +241,6 @@ class BulkChunkProcessor:
         start_rowid: str | None = chunk.get("start_rowid")
         end_rowid: str | None = chunk.get("end_rowid")
 
-        # Child static jobs (hybrid background phase) run with CDC already active.
-        # Skip index management to avoid disrupting concurrent CDC writes.
-        is_child_static = job.parent_job_id is not None
-
         select_sql, select_params = _build_source_select(
             source_table, insertable_cols, scn_cutoff, start_rowid, end_rowid
         )
@@ -308,14 +251,9 @@ class BulkChunkProcessor:
         rows_processed = 0
         batch_size = self._config.worker_bulk_batch_size
         lob_batch_size = self._config.worker_bulk_lob_batch_size
-        tgt_schema, tgt_table = target_table.split(".", 1)
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn:
             with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
-                with tgt_conn.cursor() as _cur:
-                    _cur.execute("ALTER SESSION SET SKIP_UNUSABLE_INDEXES = TRUE")
-                if not is_child_static:
-                    _disable_target_nonunique_indexes(tgt_conn, tgt_schema, tgt_table)
                 chunk_id_str = str(chunk["chunk_id"])
                 with src_conn.cursor() as src_cur:
                     src_cur.arraysize = batch_size
@@ -358,30 +296,6 @@ class BulkChunkProcessor:
                             )
 
         return rows_processed
-
-    def rebuild_indexes_if_done(self, chunk: dict[str, Any]) -> None:
-        """Called after complete_chunk. Rebuilds indexes if this was the last chunk for the job.
-
-        For child static jobs: rebuilds when all its own chunks are done (CDC continues unaffected
-        since REBUILD NOLOGGING is fast on historical data and indexes were never disabled for child).
-        For parent/standalone jobs: rebuilds when all chunks are done.
-        """
-        job_id = str(chunk["job_id"])
-        if not self._repository.all_chunks_completed(job_id):
-            return
-
-        job = self._repository.get_job(job_id)
-        target_table = job.target_table_name or job.table_name
-        tgt_schema, tgt_table = target_table.split(".", 1)
-        tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
-
-        logger.info(
-            "All chunks done — rebuilding indexes on %s.%s (job_id=%s)",
-            tgt_schema, tgt_table, job_id,
-        )
-        with _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
-            _rebuild_target_unusable_indexes(tgt_conn, tgt_schema, tgt_table)
-
 
 # ---------------------------------------------------------------------------
 # Per-job state for MultiTableCDCConsumer
@@ -669,7 +583,15 @@ class MultiTableCDCConsumer:
                 if op in ("c", "r", "u") and after is not None:
                     cur.execute(state.merge_sql, after)
                 elif op == "d" and before is not None:
-                    key_row = {k: before[k] for k in state.pk_cols if k in before}
+                    missing = [k for k in state.pk_cols if k not in before]
+                    if missing:
+                        logger.warning(
+                            "Delete event missing PK columns %s, skipping (topic=%s offset=%s)",
+                            missing, state.topic, msg.offset(),
+                            extra={"job_id": state.job_id},
+                        )
+                        return
+                    key_row = {k: before[k] for k in state.pk_cols}
                     cur.execute(state.delete_sql, key_row)
                 else:
                     logger.debug(
@@ -780,8 +702,6 @@ class BulkWorker:
         try:
             rows = self._bulk.process(chunk)
             self._repository.complete_chunk(chunk_id, rows)
-            # Check AFTER marking complete — all_chunks_completed may now be True
-            self._bulk.rebuild_indexes_if_done(chunk)
             logger.info("Bulk chunk completed", extra={"chunk_id": chunk_id, "rows": rows})
         except Exception as exc:
             logger.exception("Bulk chunk failed", extra={"chunk_id": chunk_id})
@@ -863,7 +783,6 @@ class MigrationWorker:
         try:
             rows = self._bulk.process(chunk)
             self._repository.complete_chunk(chunk_id, rows)
-            self._bulk.rebuild_indexes_if_done(chunk)
             logger.info("Bulk chunk completed", extra={"chunk_id": chunk_id, "rows": rows})
         except Exception as exc:
             logger.exception("Bulk chunk failed", extra={"chunk_id": chunk_id})

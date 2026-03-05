@@ -203,10 +203,8 @@ class CoordinatorRepository:
                             parent_job_id,
                         ),
                     )
-                except Exception as exc:
-                    if "idx_jobs_idempotency" in str(exc):
-                        raise ConflictError("Job with this idempotency key already exists") from exc
-                    raise
+                except psycopg.errors.UniqueViolation as exc:
+                    raise ConflictError("Job with this idempotency key already exists") from exc
                 row = cur.fetchone()
                 return self._to_job(row)
 
@@ -401,14 +399,19 @@ class CoordinatorRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COUNT(*) AS pending_count
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE status = 'completed') AS done
                     FROM migration_system.migration_chunks
-                    WHERE job_id = %s AND status <> 'completed'
+                    WHERE job_id = %s
                     """,
                     (job_id,),
                 )
                 row = cur.fetchone()
-        return int(row["pending_count"]) == 0
+        total = int(row["total"])
+        if total == 0:
+            return False
+        return int(row["done"]) == total
 
     def list_cdc_jobs_for_monitoring(self) -> list[JobRecord]:
         with self._db.connection() as conn:
