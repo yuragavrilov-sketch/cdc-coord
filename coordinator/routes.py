@@ -138,6 +138,20 @@ def build_api_blueprint(
             },
         }), 200
 
+    @bp.get("/tables")
+    def list_tables():
+        search  = request.args.get("search",   "").strip()
+        sort_by = request.args.get("sort",      "table_name")
+        order   = request.args.get("order",     "asc")
+        page    = request.args.get("page",      default=1,  type=int)
+        per_page = request.args.get("per_page", default=20, type=int)
+        per_page = min(max(per_page, 1), 200)
+        items, total = repository.list_tables_paginated(
+            search=search, sort_by=sort_by, order=order, page=page, per_page=per_page,
+        )
+        pages = max(1, (total + per_page - 1) // per_page)
+        return jsonify({"items": items, "total": total, "page": page, "per_page": per_page, "pages": pages}), 200
+
     @bp.get("/tables/<path:table_name>/jobs")
     def get_jobs_for_table(table_name: str):
         jobs = repository.list_jobs_for_table(table_name)

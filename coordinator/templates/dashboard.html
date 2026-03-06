@@ -86,7 +86,7 @@
       .badge-error   { background: #fee2e2; color: #991b1b; }
       .badge-other   { background: #fef3c7; color: #92400e; }
 
-      /* Overlay */
+      /* Overlay (shared) */
       .overlay {
         position: fixed; inset: 0; background: rgba(0,0,0,.35);
         z-index: 100; opacity: 0; pointer-events: none;
@@ -94,7 +94,30 @@
       }
       .overlay.visible { opacity: 1; pointer-events: all; }
 
-      /* Side panel (create-job form only) */
+      /* Modal dialog */
+      .modal {
+        position: fixed; inset: 0; z-index: 102;
+        display: flex; align-items: center; justify-content: center;
+        pointer-events: none; opacity: 0; transition: opacity .18s;
+      }
+      .modal.visible { opacity: 1; pointer-events: all; }
+      .modal-box {
+        background: #fff; border-radius: 10px;
+        box-shadow: 0 8px 40px rgba(0,0,0,.18);
+        width: 500px; max-width: calc(100vw - 32px);
+        max-height: calc(100vh - 48px);
+        display: flex; flex-direction: column;
+        transform: scale(.96); transition: transform .18s;
+      }
+      .modal.visible .modal-box { transform: scale(1); }
+      .modal-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 16px 20px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0;
+      }
+      .modal-header h2 { margin: 0; font-size: 16px; }
+      .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+
+      /* Side panel (create-job from row click) */
       .side-panel {
         position: fixed; top: 0; right: 0; bottom: 0;
         width: 440px; max-width: 100vw;
@@ -168,6 +191,41 @@
       /* Progress cell in jobs list */
       .progress-cell { font-size: 12px; color: #4b5563; white-space: nowrap; }
       .progress-cell .speed { color: #1d4ed8; margin-left: 6px; }
+
+      /* Table toolbar */
+      .tbl-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+      .tbl-toolbar h2 { margin: 0; flex-shrink: 0; }
+      #tbl-search {
+        flex: 1; min-width: 160px; max-width: 320px;
+        border: 1px solid #d1d5db; border-radius: 6px;
+        padding: 7px 10px; font-size: 14px; color: #1f2937;
+      }
+      .btn-add-table {
+        padding: 7px 16px; background: #1d4ed8; color: #fff;
+        border: none; border-radius: 6px; font-size: 14px;
+        font-weight: 600; cursor: pointer; white-space: nowrap;
+        margin-left: auto;
+      }
+      .btn-add-table:hover { background: #1e40af; }
+
+      /* Sortable column headers */
+      th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+      th.sortable:hover { color: #1d4ed8; }
+      .sort-arrow { margin-left: 4px; font-size: 10px; color: #9ca3af; }
+      th.sort-asc .sort-arrow::after  { content: "▲"; color: #1d4ed8; }
+      th.sort-desc .sort-arrow::after { content: "▼"; color: #1d4ed8; }
+      th.sort-none .sort-arrow::after { content: "↕"; }
+
+      /* Pagination */
+      .pagination { display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+      .pagination button {
+        padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 5px;
+        background: #fff; cursor: pointer; font-size: 13px; color: #374151;
+      }
+      .pagination button:hover:not(:disabled) { background: #f3f4f6; }
+      .pagination button:disabled { opacity: .4; cursor: not-allowed; }
+      .pagination button.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+      .pagination-info { font-size: 12px; color: #6b7280; margin-left: 4px; }
     </style>
   </head>
   <body>
@@ -184,70 +242,47 @@
     </section>
 
     <section>
-      <h2>Таблицы / Jobs</h2>
-      {% if jobs_error %}
-      <div class="error">{{ jobs_error }}</div>
-      {% endif %}
-      {% if source_tables_error %}
-      <div class="error">{{ source_tables_error }}</div>
-      {% endif %}
+      <div class="tbl-toolbar">
+        <h2>Таблицы / Jobs</h2>
+        <input type="text" id="tbl-search" placeholder="Поиск по таблице…" autocomplete="off">
+        <button class="btn-add-table" id="btn-add-table">+ Добавить таблицу</button>
+      </div>
+      <div id="tbl-error" class="error" style="display:none"></div>
 
       <table id="main-table">
         <thead>
           <tr>
-            <th>Source Table</th>
+            <th class="sortable sort-none" data-col="table_name">Source Table <span class="sort-arrow"></span></th>
             <th>Target Table</th>
-            <th>Mode</th>
-            <th>Status</th>
+            <th class="sortable sort-none" data-col="migration_mode">Mode <span class="sort-arrow"></span></th>
+            <th class="sortable sort-none" data-col="status">Status <span class="sort-arrow"></span></th>
             <th>Прогресс</th>
             <th>Job ID</th>
           </tr>
         </thead>
-        <tbody>
-          {% if table_statuses %}
-            {% for item in table_statuses %}
-            <tr
-              class="data-row"
-              data-source-table="{{ item.source_table }}"
-              data-status="{{ item.status }}"
-              data-job-id="{{ item.job_id }}"
-            >
-              <td>
-                <span class="expand-icon">&#9654;</span>{{ item.source_table }}
-              </td>
-              <td>{{ item.target_table }}</td>
-              <td>{{ item.mode }}</td>
-              <td>
-                {% set s = item.status %}
-                {% if s == "не мигрирована" %}
-                  <span class="badge badge-none">{{ s }}</span>
-                {% elif s in ["completed"] %}
-                  <span class="badge badge-done">{{ s }}</span>
-                {% elif s in ["bulk_running", "cdc_accumulating", "cdc_catchup", "cdc_streaming", "bulk_done", "pending"] %}
-                  <span class="badge badge-running">{{ s }}</span>
-                {% elif s in ["failed", "error"] %}
-                  <span class="badge badge-error">{{ s }}</span>
-                {% else %}
-                  <span class="badge badge-other">{{ s }}</span>
-                {% endif %}
-              </td>
-              <td class="progress-cell" id="progress-{{ item.job_id }}"><span class="muted">—</span></td>
-              <td class="muted" style="font-size:11px;">{{ item.job_id }}</td>
-            </tr>
-            {% endfor %}
-          {% else %}
-            <tr>
-              <td colspan="6" class="muted">Нет доступных таблиц source schema</td>
-            </tr>
-          {% endif %}
+        <tbody id="tbl-body">
+          <tr><td colspan="6" class="loading">Загрузка…</td></tr>
         </tbody>
       </table>
+
+      <div class="pagination" id="tbl-pagination"></div>
     </section>
 
-    <!-- Overlay (create-job panel only) -->
+    <!-- Shared overlay -->
     <div id="overlay" class="overlay"></div>
 
-    <!-- Side panel (create-job form only) -->
+    <!-- Modal: add new table -->
+    <div id="add-table-modal" class="modal" role="dialog" aria-modal="true">
+      <div class="modal-box">
+        <div class="modal-header">
+          <h2>Добавить таблицу для миграции</h2>
+          <button class="btn-close" id="modal-close" title="Закрыть">&#x2715;</button>
+        </div>
+        <div class="modal-body" id="modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Side panel (create-job from row click) -->
     <div id="side-panel" class="side-panel" role="dialog" aria-modal="true">
       <div class="panel-header">
         <h2 id="panel-title"></h2>
@@ -353,7 +388,25 @@
         refreshStatuses();
         setInterval(refreshStatuses, POLL_INTERVAL_MS);
 
-        /* ─── Side panel (create-job only) ─── */
+        /* ─── Modal (add new table) ─── */
+        const addTableModal = document.getElementById("add-table-modal");
+        const modalBody     = document.getElementById("modal-body");
+        const modalClose    = document.getElementById("modal-close");
+
+        function openModal(html) {
+          modalBody.innerHTML = html;
+          document.getElementById("overlay").classList.add("visible");
+          addTableModal.classList.add("visible");
+        }
+
+        function closeModal() {
+          document.getElementById("overlay").classList.remove("visible");
+          addTableModal.classList.remove("visible");
+        }
+
+        modalClose.addEventListener("click", closeModal);
+
+        /* ─── Side panel (create-job from row click) ─── */
         const overlay   = document.getElementById("overlay");
         const sidePanel = document.getElementById("side-panel");
         const panelTitle = document.getElementById("panel-title");
@@ -373,18 +426,25 @@
         }
 
         panelClose.addEventListener("click", closePanel);
-        overlay.addEventListener("click", closePanel);
+        overlay.addEventListener("click", function () {
+          closePanel();
+          closeModal();
+        });
         document.addEventListener("keydown", function (e) {
-          if (e.key === "Escape") closePanel();
+          if (e.key === "Escape") { closePanel(); closeModal(); }
         });
 
         /* ─── Create-job panel ─── */
-        function renderCreateJobForm(sourceTable) {
+        function renderCreateJobForm(sourceTable, editableSource) {
+          const colsHint = editableSource
+            ? "Введите Source Table выше и нажмите Tab / кликните в другое поле"
+            : "Загрузка колонок…";
           return `
             <form id="create-job-form" autocomplete="off">
               <div class="form-group">
                 <label>Source Table</label>
-                <input type="text" id="f-source" value="${escHtml(sourceTable)}" readonly>
+                <input type="text" id="f-source" value="${escHtml(sourceTable)}"${editableSource ? "" : " readonly"}
+                  placeholder="SCHEMA.TABLE_NAME">
               </div>
               <div class="form-group">
                 <label>Target Table</label>
@@ -404,7 +464,7 @@
               </div>
               <div class="form-group">
                 <label>Message Key Columns <span class="hint">— необязательно, если есть PK</span></label>
-                <div id="cols-loading" class="cols-loading">Загрузка колонок…</div>
+                <div id="cols-loading" class="cols-loading">${colsHint}</div>
                 <div id="cols-multiselect" style="display:none">
                   <div class="multiselect-box" id="cols-checkboxes"></div>
                   <div id="pk-notice" style="display:none"></div>
@@ -460,11 +520,20 @@
           }
         }
 
-        function bindCreateJobForm(sourceTable) {
+        function bindCreateJobForm(sourceTable, editableSource) {
           const form = document.getElementById("create-job-form");
           if (!form) return;
 
-          loadColumns(sourceTable);
+          if (editableSource) {
+            const srcInput = document.getElementById("f-source");
+            // Load columns when user leaves the source field
+            srcInput.addEventListener("blur", function () {
+              const tbl = srcInput.value.trim();
+              if (tbl) loadColumns(tbl);
+            });
+          } else {
+            loadColumns(sourceTable);
+          }
 
           // Toggle recent-rows field visibility for hybrid mode
           form.querySelectorAll("input[name=mode]").forEach(function (radio) {
@@ -478,6 +547,7 @@
             e.preventDefault();
             const msgEl  = document.getElementById("form-msg");
             const btn    = document.getElementById("f-submit");
+            // Always read from the input (supports editable source)
             const source = document.getElementById("f-source").value.trim();
             const target = document.getElementById("f-target").value.trim();
             const mode   = form.querySelector("input[name=mode]:checked").value;
@@ -803,11 +873,9 @@
             });
         }
 
-        /* ─── Row click handler ─── */
-        document.querySelector("tbody").addEventListener("click", function (e) {
-          // Ignore clicks on buttons/links inside accordion rows
+        /* ─── Row click handler (delegated — body may be re-rendered) ─── */
+        document.getElementById("tbl-body").addEventListener("click", function (e) {
           if (e.target.closest(".accordion-row")) return;
-
           const tr = e.target.closest("tr.data-row");
           if (!tr) return;
 
@@ -815,43 +883,177 @@
           const status      = tr.dataset.status;
           const jobId       = tr.dataset.jobId;
 
-          if (status === NOT_MIGRATED || !jobId || jobId === "—") {
-            // Open create-job side panel
-            openPanel("Создать Job — " + sourceTable, renderCreateJobForm(sourceTable));
-            bindCreateJobForm(sourceTable);
+          if (!jobId || jobId === "—") {
+            openPanel("Создать Job — " + sourceTable, renderCreateJobForm(sourceTable, false));
+            bindCreateJobForm(sourceTable, false);
           } else {
-            // Toggle inline accordion with job details
             openAccordion(tr);
           }
         });
 
-        /* ─── Chunk stats in jobs list ─── */
-        async function loadAllChunkStats() {
-          const rows = document.querySelectorAll("tbody tr.data-row[data-job-id]");
-          const promises = [];
-          rows.forEach(function (tr) {
-            const jobId = tr.dataset.jobId;
-            if (!jobId || jobId === "—") return;
+        /* ─── "Add table" button ─── */
+        document.getElementById("btn-add-table").addEventListener("click", function () {
+          openModal(renderCreateJobForm("", true));
+          bindCreateJobForm("", true);
+        });
+
+        /* ─── Table list (paginated, sortable, searchable) ─── */
+        const tblState = { search: "", sort: "table_name", order: "asc", page: 1, per_page: 20 };
+
+        async function loadTable() {
+          const body    = document.getElementById("tbl-body");
+          const errEl   = document.getElementById("tbl-error");
+          const pgEl    = document.getElementById("tbl-pagination");
+          body.innerHTML = `<tr><td colspan="6" class="loading">Загрузка…</td></tr>`;
+          errEl.style.display = "none";
+
+          const params = new URLSearchParams({
+            search:   tblState.search,
+            sort:     tblState.sort,
+            order:    tblState.order,
+            page:     tblState.page,
+            per_page: tblState.per_page,
+          });
+
+          let data;
+          try {
+            data = await fetchJson("/api/v1/tables?" + params.toString());
+          } catch (err) {
+            body.innerHTML = `<tr><td colspan="6" class="muted">Не удалось загрузить таблицы</td></tr>`;
+            errEl.textContent = "Ошибка загрузки: " + String(err.message || err);
+            errEl.style.display = "block";
+            pgEl.innerHTML = "";
+            return;
+          }
+
+          const items = data.items || [];
+          if (items.length === 0) {
+            body.innerHTML = `<tr><td colspan="6" class="muted">Нет таблиц${tblState.search ? " по запросу «" + escHtml(tblState.search) + "»" : ""}</td></tr>`;
+            pgEl.innerHTML = "";
+            renderPagination(data.page, data.pages, data.total, data.per_page);
+            return;
+          }
+
+          body.innerHTML = items.map(function (item) {
+            return `<tr
+              class="data-row"
+              data-source-table="${escHtml(item.source_table)}"
+              data-status="${escHtml(item.status)}"
+              data-job-id="${escHtml(item.job_id)}"
+            >
+              <td><span class="expand-icon">&#9654;</span>${escHtml(item.source_table)}</td>
+              <td>${escHtml(item.target_table)}</td>
+              <td>${escHtml(item.mode)}</td>
+              <td>${statusBadgeHtml(item.status)}</td>
+              <td class="progress-cell" id="progress-${escHtml(item.job_id)}"><span class="muted">—</span></td>
+              <td class="muted" style="font-size:11px;">${escHtml(item.job_id)}</td>
+            </tr>`;
+          }).join("");
+
+          renderPagination(data.page, data.pages, data.total, data.per_page);
+          loadChunkStats(items);
+        }
+
+        function renderPagination(page, pages, total, perPage) {
+          const pgEl = document.getElementById("tbl-pagination");
+          if (pages <= 1 && total <= perPage) {
+            pgEl.innerHTML = total
+              ? `<span class="pagination-info">Всего: ${total}</span>`
+              : "";
+            return;
+          }
+          const from = (page - 1) * perPage + 1;
+          const to   = Math.min(page * perPage, total);
+          let html = `<button id="pg-prev" ${page <= 1 ? "disabled" : ""}>&#8592; Пред.</button>`;
+
+          const maxButtons = 7;
+          let startPage = Math.max(1, page - Math.floor(maxButtons / 2));
+          let endPage   = Math.min(pages, startPage + maxButtons - 1);
+          if (endPage - startPage < maxButtons - 1) startPage = Math.max(1, endPage - maxButtons + 1);
+
+          if (startPage > 1) html += `<button class="pg-num" data-page="1">1</button>` + (startPage > 2 ? `<span style="padding:0 4px;color:#9ca3af">…</span>` : "");
+          for (let p = startPage; p <= endPage; p++) {
+            html += `<button class="pg-num${p === page ? " active" : ""}" data-page="${p}">${p}</button>`;
+          }
+          if (endPage < pages) {
+            html += (endPage < pages - 1 ? `<span style="padding:0 4px;color:#9ca3af">…</span>` : "") + `<button class="pg-num" data-page="${pages}">${pages}</button>`;
+          }
+
+          html += `<button id="pg-next" ${page >= pages ? "disabled" : ""}>След. &#8594;</button>`;
+          html += `<span class="pagination-info">${from}–${to} из ${total}</span>`;
+          pgEl.innerHTML = html;
+
+          pgEl.querySelector("#pg-prev") && pgEl.querySelector("#pg-prev").addEventListener("click", function () {
+            if (tblState.page > 1) { tblState.page--; loadTable(); }
+          });
+          pgEl.querySelector("#pg-next") && pgEl.querySelector("#pg-next").addEventListener("click", function () {
+            if (tblState.page < pages) { tblState.page++; loadTable(); }
+          });
+          pgEl.querySelectorAll(".pg-num").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              tblState.page = parseInt(btn.dataset.page, 10);
+              loadTable();
+            });
+          });
+        }
+
+        async function loadChunkStats(items) {
+          const promises = items.map(function (item) {
+            const jobId = item.job_id;
+            if (!jobId || jobId === "—") return Promise.resolve();
             const cell = document.getElementById("progress-" + jobId);
-            if (!cell) return;
-            promises.push(
-              fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks")
-                .then(function (data) {
-                  const stats = data.stats || {};
-                  const total = stats.total || 0;
-                  if (total === 0) { cell.innerHTML = '<span class="muted">—</span>'; return; }
-                  const done = (stats.by_status || {}).completed || 0;
-                  const spd  = stats.avg_rows_per_second;
-                  cell.innerHTML = `<strong>${done}</strong> / ${total} чанков`
-                    + (spd != null ? `<span class="speed">${formatSpeed(spd)}</span>` : "");
-                })
-                .catch(function () { cell.innerHTML = '<span class="muted">—</span>'; })
-            );
+            if (!cell) return Promise.resolve();
+            return fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks")
+              .then(function (data) {
+                const stats = data.stats || {};
+                const total = stats.total || 0;
+                if (total === 0) { cell.innerHTML = '<span class="muted">—</span>'; return; }
+                const done = (stats.by_status || {}).completed || 0;
+                const spd  = stats.avg_rows_per_second;
+                cell.innerHTML = `<strong>${done}</strong> / ${total} чанков`
+                  + (spd != null ? `<span class="speed">${formatSpeed(spd)}</span>` : "");
+              })
+              .catch(function () { cell.innerHTML = '<span class="muted">—</span>'; });
           });
           await Promise.all(promises);
         }
 
-        loadAllChunkStats();
+        /* ─── Sort headers ─── */
+        document.querySelectorAll("th.sortable").forEach(function (th) {
+          th.addEventListener("click", function () {
+            const col = th.dataset.col;
+            if (tblState.sort === col) {
+              tblState.order = tblState.order === "asc" ? "desc" : "asc";
+            } else {
+              tblState.sort  = col;
+              tblState.order = "asc";
+            }
+            tblState.page = 1;
+            document.querySelectorAll("th.sortable").forEach(function (h) {
+              h.classList.remove("sort-asc", "sort-desc");
+              h.classList.add("sort-none");
+            });
+            th.classList.remove("sort-none");
+            th.classList.add(tblState.order === "asc" ? "sort-asc" : "sort-desc");
+            loadTable();
+          });
+        });
+
+        /* ─── Search (debounced) ─── */
+        (function () {
+          let timer;
+          document.getElementById("tbl-search").addEventListener("input", function (e) {
+            clearTimeout(timer);
+            timer = setTimeout(function () {
+              tblState.search = e.target.value.trim();
+              tblState.page = 1;
+              loadTable();
+            }, 400);
+          });
+        })();
+
+        /* Initial load */
+        loadTable();
       })();
     </script>
   </body>

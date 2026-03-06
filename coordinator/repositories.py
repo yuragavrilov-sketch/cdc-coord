@@ -860,6 +860,68 @@ class CoordinatorRepository:
                     (table_name.upper(),),
                 )
 
+    def list_tables_paginated(
+        self,
+        *,
+        search: str = "",
+        sort_by: str = "table_name",
+        order: str = "asc",
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return paginated table list from state DB (latest job per table).
+
+        Each item: {source_table, target_table, mode, status, job_id}
+        """
+        allowed_sort = {"table_name", "status", "migration_mode"}
+        if sort_by not in allowed_sort:
+            sort_by = "table_name"
+        sort_dir = "ASC" if order.lower() != "desc" else "DESC"
+        offset = (max(page, 1) - 1) * per_page
+        pattern = f"%{search.upper()}%" if search else "%"
+
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH latest AS (
+                        SELECT DISTINCT ON (UPPER(table_name))
+                            job_id, table_name, target_table_name,
+                            migration_mode, status
+                        FROM migration_system.migration_jobs
+                        ORDER BY UPPER(table_name), created_at DESC NULLS LAST
+                    )
+                    SELECT * FROM latest
+                    WHERE UPPER(table_name) LIKE %s
+                    ORDER BY {sort_by} {sort_dir}
+                    LIMIT %s OFFSET %s
+                    """,
+                    (pattern, per_page, offset),
+                )
+                rows = cur.fetchall()
+
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT UPPER(table_name)) AS total
+                    FROM migration_system.migration_jobs
+                    WHERE UPPER(table_name) LIKE %s
+                    """,
+                    (pattern,),
+                )
+                total = int((cur.fetchone() or {}).get("total", 0))
+
+        items = [
+            {
+                "source_table": row["table_name"],
+                "target_table": row.get("target_table_name") or "—",
+                "mode": row.get("migration_mode") or "—",
+                "status": row.get("status") or "—",
+                "job_id": str(row["job_id"]) if row.get("job_id") else "—",
+            }
+            for row in rows
+        ]
+        return items, total
+
     def list_jobs_for_table(self, table_name: str) -> list[JobRecord]:
         """Return all jobs (parent + children) for a source table, newest first."""
         key = self._normalize_table_key(table_name)
