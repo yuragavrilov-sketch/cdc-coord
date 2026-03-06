@@ -237,6 +237,12 @@
         margin-left: auto;
       }
       .btn-add-table:hover { background: #1e40af; }
+      .btn-delete-table {
+        background: none; border: none; cursor: pointer;
+        font-size: 16px; padding: 2px 6px; border-radius: 4px; opacity: 0.55;
+      }
+      .btn-delete-table:hover { opacity: 1; background: #fee2e2; }
+      .btn-delete-table:disabled { opacity: 0.25; cursor: default; }
 
       /* Sortable column headers */
       th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -288,10 +294,11 @@
             <th class="sortable sort-none" data-col="status">Status <span class="sort-arrow"></span></th>
             <th>Прогресс</th>
             <th>Job ID</th>
+            <th></th>
           </tr>
         </thead>
         <tbody id="tbl-body">
-          <tr><td colspan="6" class="loading">Загрузка…</td></tr>
+          <tr><td colspan="7" class="loading">Загрузка…</td></tr>
         </tbody>
       </table>
 
@@ -1117,8 +1124,26 @@
         }
 
         /* ─── Row click handler (delegated — body may be re-rendered) ─── */
-        document.getElementById("tbl-body").addEventListener("click", function (e) {
+        document.getElementById("tbl-body").addEventListener("click", async function (e) {
           if (e.target.closest(".accordion-row")) return;
+
+          /* Delete table button */
+          const delBtn = e.target.closest(".btn-delete-table");
+          if (delBtn) {
+            e.stopPropagation();
+            const tbl = delBtn.dataset.table;
+            if (!confirm(`Удалить все джобы таблицы «${tbl}»?\nДействие необратимо.`)) return;
+            delBtn.disabled = true;
+            try {
+              await fetchJson("/api/v1/tables/" + encodeURIComponent(tbl), { method: "DELETE" });
+              loadTable();
+            } catch (err) {
+              alert("Ошибка удаления: " + String(err.message || err));
+              delBtn.disabled = false;
+            }
+            return;
+          }
+
           const tr = e.target.closest("tr.data-row");
           if (!tr) return;
 
@@ -1147,7 +1172,7 @@
           const body    = document.getElementById("tbl-body");
           const errEl   = document.getElementById("tbl-error");
           const pgEl    = document.getElementById("tbl-pagination");
-          body.innerHTML = `<tr><td colspan="6" class="loading">Загрузка…</td></tr>`;
+          body.innerHTML = `<tr><td colspan="7" class="loading">Загрузка…</td></tr>`;
           errEl.style.display = "none";
 
           const params = new URLSearchParams({
@@ -1162,7 +1187,7 @@
           try {
             data = await fetchJson("/api/v1/tables?" + params.toString());
           } catch (err) {
-            body.innerHTML = `<tr><td colspan="6" class="muted">Не удалось загрузить таблицы</td></tr>`;
+            body.innerHTML = `<tr><td colspan="7" class="muted">Не удалось загрузить таблицы</td></tr>`;
             errEl.textContent = "Ошибка загрузки: " + String(err.message || err);
             errEl.style.display = "block";
             pgEl.innerHTML = "";
@@ -1171,7 +1196,7 @@
 
           const items = data.items || [];
           if (items.length === 0) {
-            body.innerHTML = `<tr><td colspan="6" class="muted">Нет таблиц${tblState.search ? " по запросу «" + escHtml(tblState.search) + "»" : ""}</td></tr>`;
+            body.innerHTML = `<tr><td colspan="7" class="muted">Нет таблиц${tblState.search ? " по запросу «" + escHtml(tblState.search) + "»" : ""}</td></tr>`;
             pgEl.innerHTML = "";
             renderPagination(data.page, data.pages, data.total, data.per_page);
             return;
@@ -1190,6 +1215,9 @@
               <td>${statusBadgeHtml(item.status)}</td>
               <td class="progress-cell" id="progress-${escHtml(item.job_id)}"><span class="muted">—</span></td>
               <td class="muted" style="font-size:11px;">${escHtml(item.job_id)}</td>
+              <td style="white-space:nowrap;">
+                <button class="btn-delete-table" data-table="${escHtml(item.source_table)}" title="Удалить все джобы таблицы">&#x1F5D1;</button>
+              </td>
             </tr>`;
           }).join("");
 

@@ -1066,6 +1066,13 @@ class CoordinatorRepository:
             if self._normalize_table_key(r.get("table_name")) == key
         ]
 
+    def delete_jobs_for_table(self, table_name: str) -> int:
+        """Delete all jobs (and their chunks/sql_templates) for a source table. Returns count of deleted jobs."""
+        jobs = self.list_jobs_for_table(table_name)
+        for job in jobs:
+            self.delete_job(job.job_id)
+        return len(jobs)
+
     @staticmethod
     def _normalize_table_key(table_name: str | None) -> str | None:
         return normalize_table_key(table_name)

@@ -129,6 +129,11 @@ def build_api_blueprint(
         pages = max(1, (total + per_page - 1) // per_page)
         return jsonify({"items": items, "total": total, "page": page, "per_page": per_page, "pages": pages}), 200
 
+    @bp.delete("/tables/<path:table_name>")
+    def delete_table(table_name: str):
+        deleted = repository.delete_jobs_for_table(table_name)
+        return jsonify({"deleted_jobs": deleted}), 200
+
     @bp.get("/tables/<path:table_name>/jobs")
     def get_jobs_for_table(table_name: str):
         jobs = repository.list_jobs_for_table(table_name)
