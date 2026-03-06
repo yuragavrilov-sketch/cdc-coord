@@ -332,6 +332,130 @@ class CoordinatorRepository:
                 rows = cur.fetchall()
         return [self._to_job(row) for row in rows]
 
+    def get_chunk_stats(self, job_id: str) -> dict[str, Any]:
+        """Return aggregate chunk stats for a job via a single SQL query."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*)                                              AS total,
+                        COUNT(*) FILTER (WHERE status = 'completed')         AS completed,
+                        COUNT(*) FILTER (WHERE status = 'running')           AS running,
+                        COUNT(*) FILTER (WHERE status IN ('failed','error')) AS failed,
+                        COUNT(*) FILTER (WHERE status = 'pending')           AS pending,
+                        COALESCE(SUM(rows_processed), 0)                     AS rows_processed,
+                        MIN(assigned_at)  FILTER (WHERE status = 'completed') AS first_start,
+                        MAX(completed_at) FILTER (WHERE status = 'completed') AS last_end,
+                        COALESCE(SUM(rows_processed) FILTER (WHERE status = 'completed'), 0) AS completed_rows
+                    FROM migration_system.migration_chunks
+                    WHERE job_id = %s
+                    """,
+                    (job_id,),
+                )
+                row = cur.fetchone() or {}
+
+        total       = int(row.get("total")       or 0)
+        completed   = int(row.get("completed")   or 0)
+        running     = int(row.get("running")     or 0)
+        failed      = int(row.get("failed")      or 0)
+        pending     = int(row.get("pending")     or 0)
+        rows_proc   = int(row.get("rows_processed") or 0)
+        comp_rows   = int(row.get("completed_rows") or 0)
+
+        avg_speed: float | None = None
+        first_start = row.get("first_start")
+        last_end    = row.get("last_end")
+        if first_start and last_end and comp_rows > 0:
+            elapsed = (last_end - first_start).total_seconds()
+            if elapsed > 0:
+                avg_speed = round(comp_rows / elapsed, 1)
+
+        return {
+            "total": total,
+            "by_status": {
+                "completed": completed,
+                "running":   running,
+                "failed":    failed,
+                "pending":   pending,
+            },
+            "rows_processed":    rows_proc,
+            "avg_rows_per_second": avg_speed,
+        }
+
+    def list_chunks_paginated(
+        self,
+        job_id: str,
+        *,
+        search: str = "",
+        sort_by: str = "assigned_at",
+        order: str = "asc",
+        page: int = 1,
+        per_page: int = 50,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return paginated/filtered/sorted chunks for a job."""
+        allowed_sort = {"assigned_at", "completed_at", "rows_processed", "status"}
+        if sort_by not in allowed_sort:
+            sort_by = "assigned_at"
+        sort_dir = "ASC" if order.lower() != "desc" else "DESC"
+        offset = (max(page, 1) - 1) * per_page
+
+        search_sql = ""
+        params: list[Any] = [job_id]
+        if search:
+            search_sql = "AND (status ILIKE %s OR COALESCE(assigned_worker_id,'') ILIKE %s)"
+            pattern = f"%{search}%"
+            params += [pattern, pattern]
+
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) AS total FROM migration_system.migration_chunks"
+                    f" WHERE job_id = %s {search_sql}",
+                    params,
+                )
+                total = int((cur.fetchone() or {}).get("total", 0))
+
+                cur.execute(
+                    f"""
+                    SELECT
+                        chunk_id, status, assigned_worker_id,
+                        rows_processed, error_message,
+                        assigned_at, completed_at,
+                        CASE
+                            WHEN completed_at IS NOT NULL AND assigned_at IS NOT NULL
+                                THEN EXTRACT(EPOCH FROM (completed_at - assigned_at))
+                            WHEN assigned_at IS NOT NULL
+                                THEN EXTRACT(EPOCH FROM (NOW() - assigned_at))
+                            ELSE NULL
+                        END AS elapsed_seconds
+                    FROM migration_system.migration_chunks
+                    WHERE job_id = %s {search_sql}
+                    ORDER BY {sort_by} {sort_dir} NULLS LAST, chunk_id
+                    LIMIT %s OFFSET %s
+                    """,
+                    params + [per_page, offset],
+                )
+                rows = cur.fetchall()
+
+        result = []
+        for row in rows:
+            elapsed  = row.get("elapsed_seconds")
+            rows_proc = int(row.get("rows_processed") or 0)
+            speed = round(rows_proc / float(elapsed), 1) if elapsed and float(elapsed) > 0 else None
+            result.append({
+                "chunk_id":          str(row["chunk_id"]),
+                "status":            row["status"],
+                "assigned_worker_id": row.get("assigned_worker_id"),
+                "rows_processed":    rows_proc,
+                "error_message":     row.get("error_message"),
+                "assigned_at":       row["assigned_at"].isoformat() if row.get("assigned_at") else None,
+                "completed_at":      row["completed_at"].isoformat() if row.get("completed_at") else None,
+                "elapsed_seconds":   round(float(elapsed), 1) if elapsed is not None else None,
+                "rows_per_second":   speed,
+            })
+        return result, total
+
     def list_chunks(self, job_id: str) -> list[dict[str, Any]]:
         with self._db.connection() as conn:
             with conn.cursor() as cur:

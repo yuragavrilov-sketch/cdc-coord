@@ -119,6 +119,32 @@ class OracleIntrospector:
             if (name := normalize_oracle_identifier(str(row[0]))) is not None
         ]
 
+    def list_target_tables(self) -> list[str]:
+        if not self._target:
+            raise ValidationError("Oracle target connection is not configured")
+        if not self._target_schema:
+            raise ValidationError("Oracle target schema is not configured")
+
+        with self._connect(self._target) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT table_name
+                    FROM all_tables
+                    WHERE owner = :owner
+                    ORDER BY table_name
+                    """,
+                    owner=self._target_schema,
+                )
+                rows = cur.fetchall()
+
+        return [
+            name
+            for row in rows
+            if row and row[0]
+            if (name := normalize_oracle_identifier(str(row[0]))) is not None
+        ]
+
     def fetch_table_metadata(self, table_name: str) -> OracleTableMetadata:
         if not self._target:
             raise ValidationError("Oracle target connection is not configured")

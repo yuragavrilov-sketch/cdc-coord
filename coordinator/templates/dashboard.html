@@ -182,11 +182,41 @@
       /* Chunks table inside accordion */
       .chunks-summary { font-size: 12px; color: #4b5563; margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 12px; }
       .chunks-summary span { white-space: nowrap; }
-      .chunks-wrap { max-height: 260px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; }
+      .chunks-wrap { max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; }
       .chunks-table { width: 100%; border-collapse: collapse; font-size: 12px; }
       .chunks-table th { position: sticky; top: 0; background: #f9fafb; padding: 6px 8px; text-align: left; font-size: 11px; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
       .chunks-table td { padding: 6px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
       .chunks-table tr:last-child td { border-bottom: none; }
+      /* Chunks sortable headers reuse .sortable/.sort-arrow */
+      .chunks-table th.sortable { cursor: pointer; }
+      .chunks-table th.sortable:hover { color: #1d4ed8; }
+
+      /* Chunks toolbar (search) */
+      .chunks-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+      .chunks-search-input {
+        flex: 1; border: 1px solid #d1d5db; border-radius: 5px;
+        padding: 5px 8px; font-size: 12px; color: #1f2937;
+      }
+
+      /* Chunks mini-pagination */
+      .chunks-pager { display: flex; align-items: center; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+      .chunks-pager button {
+        padding: 3px 8px; border: 1px solid #d1d5db; border-radius: 4px;
+        background: #fff; cursor: pointer; font-size: 11px; color: #374151;
+      }
+      .chunks-pager button:hover:not(:disabled) { background: #f3f4f6; }
+      .chunks-pager button:disabled { opacity: .4; cursor: not-allowed; }
+      .chunks-pager button.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+      .chunks-pager-info { font-size: 11px; color: #6b7280; margin-left: 2px; }
+
+      /* Form select (shared with modal and panel) */
+      .form-group select {
+        width: 100%; box-sizing: border-box;
+        border: 1px solid #d1d5db; border-radius: 6px;
+        padding: 8px 10px; font-size: 14px; color: #1f2937;
+        background: #fff;
+      }
+      .form-group select:disabled { background: #f9fafb; color: #6b7280; }
 
       /* Progress cell in jobs list */
       .progress-cell { font-size: 12px; color: #4b5563; white-space: nowrap; }
@@ -436,19 +466,24 @@
 
         /* ─── Create-job panel ─── */
         function renderCreateJobForm(sourceTable, editableSource) {
+          const srcField = editableSource
+            ? `<select id="f-source"><option value="">— Загрузка таблиц источника… —</option></select>`
+            : `<input type="text" id="f-source" value="${escHtml(sourceTable)}" readonly>`;
+          const tgtField = editableSource
+            ? `<select id="f-target"><option value="">— Загрузка таблиц приёмника… —</option></select>`
+            : `<input type="text" id="f-target" value="${escHtml(sourceTable)}">`;
           const colsHint = editableSource
-            ? "Введите Source Table выше и нажмите Tab / кликните в другое поле"
+            ? "Выберите Source Table выше"
             : "Загрузка колонок…";
           return `
             <form id="create-job-form" autocomplete="off">
               <div class="form-group">
                 <label>Source Table</label>
-                <input type="text" id="f-source" value="${escHtml(sourceTable)}"${editableSource ? "" : " readonly"}
-                  placeholder="SCHEMA.TABLE_NAME">
+                ${srcField}
               </div>
               <div class="form-group">
                 <label>Target Table</label>
-                <input type="text" id="f-target" value="${escHtml(sourceTable)}">
+                ${tgtField}
               </div>
               <div class="form-group">
                 <label>Migration Mode</label>
@@ -520,16 +555,41 @@
           }
         }
 
+        async function populateSelect(sel, tables, preselect) {
+          sel.innerHTML = `<option value="">— выберите таблицу —</option>`
+            + tables.map(t => `<option value="${escHtml(t)}"${t === preselect ? " selected" : ""}>${escHtml(t)}</option>`).join("");
+        }
+
         function bindCreateJobForm(sourceTable, editableSource) {
           const form = document.getElementById("create-job-form");
           if (!form) return;
 
           if (editableSource) {
-            const srcInput = document.getElementById("f-source");
-            // Load columns when user leaves the source field
-            srcInput.addEventListener("blur", function () {
-              const tbl = srcInput.value.trim();
+            const srcSel = document.getElementById("f-source");
+            const tgtSel = document.getElementById("f-target");
+
+            // Load source and target tables in parallel
+            Promise.all([
+              fetchJson("/api/v1/source-tables"),
+              fetchJson("/api/v1/target-tables"),
+            ]).then(function ([srcData, tgtData]) {
+              populateSelect(srcSel, srcData.tables || [], sourceTable);
+              populateSelect(tgtSel, tgtData.tables || [], sourceTable);
+            }).catch(function (err) {
+              srcSel.innerHTML = `<option value="">Ошибка загрузки: ${escHtml(String(err.message || err))}</option>`;
+            });
+
+            srcSel.addEventListener("change", function () {
+              const tbl = srcSel.value;
+              // Pre-fill target with same name if unset or matches previous source
+              if (tgtSel.value === "" || tgtSel.dataset.autoSet === "1") {
+                const opt = Array.from(tgtSel.options).find(o => o.value === tbl);
+                if (opt) { tgtSel.value = tbl; tgtSel.dataset.autoSet = "1"; }
+              }
               if (tbl) loadColumns(tbl);
+            });
+            tgtSel.addEventListener("change", function () {
+              tgtSel.dataset.autoSet = "";
             });
           } else {
             loadColumns(sourceTable);
@@ -556,6 +616,13 @@
             const keyColumns = Array.from(
               form.querySelectorAll("input[name=key_col]:checked")
             ).map(cb => cb.value);
+
+            if (!source) {
+              msgEl.className = "form-error";
+              msgEl.textContent = "Выберите Source Table";
+              msgEl.style.display = "block";
+              return;
+            }
 
             msgEl.style.display = "none";
             btn.disabled = true;
@@ -809,29 +876,24 @@
               });
             });
 
-            // Bind "load chunks" links
+            // Bind "show chunks" toggle links
             accordionTr.querySelectorAll(".load-chunks-link").forEach(function (link) {
-              link.addEventListener("click", async function (e) {
+              link.addEventListener("click", function (e) {
                 e.preventDefault();
                 e.stopPropagation();
-                const jobId = link.dataset.jobId;
+                const jobId    = link.dataset.jobId;
                 const detailDiv = accordionTr.querySelector(`.chunks-detail[data-job-id="${jobId}"]`);
                 if (!detailDiv) return;
                 if (detailDiv.style.display !== "none") {
                   detailDiv.style.display = "none";
-                  link.textContent = "Показать все чанки…";
-                  return;
-                }
-                link.textContent = "Загрузка…";
-                try {
-                  const chunksData = await fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks");
-                  detailDiv.innerHTML = renderChunksSection(chunksData);
+                  link.textContent = "Показать чанки…";
+                } else {
                   detailDiv.style.display = "block";
                   link.textContent = "Скрыть чанки";
-                } catch (err) {
-                  detailDiv.innerHTML = `<p style="color:#991b1b;font-size:12px;">Ошибка: ${escHtml(String(err.message || err))}</p>`;
-                  detailDiv.style.display = "block";
-                  link.textContent = "Показать все чанки…";
+                  if (!detailDiv.dataset.initialized) {
+                    detailDiv.dataset.initialized = "1";
+                    initChunkSection(jobId, detailDiv);
+                  }
                 }
               });
             });
@@ -871,6 +933,190 @@
                 warnEl.style.display = "block";
               }
             });
+        }
+
+        /* ─── Chunks section (paginated / sortable / searchable) ─── */
+        function initChunkSection(jobId, container) {
+          const cs = { search: "", sort: "assigned_at", order: "asc", page: 1, per_page: 50 };
+
+          async function reload() {
+            container.querySelector(".chunks-panel-body") &&
+              (container.querySelector(".chunks-panel-body").innerHTML =
+                `<tr><td colspan="6" class="loading" style="text-align:center;padding:12px;">Загрузка…</td></tr>`);
+
+            const params = new URLSearchParams({
+              search: cs.search, sort: cs.sort, order: cs.order,
+              page: cs.page, per_page: cs.per_page,
+            });
+            let data;
+            try {
+              data = await fetchJson("/api/v1/jobs/" + encodeURIComponent(jobId) + "/chunks?" + params);
+            } catch (err) {
+              container.innerHTML =
+                `<p style="color:#991b1b;font-size:12px;padding:6px 0;">Ошибка: ${escHtml(String(err.message || err))}</p>`;
+              return;
+            }
+
+            if (!container.querySelector(".chunks-panel-body")) {
+              // First render — build full skeleton
+              container.innerHTML = renderChunksPanelShell(cs);
+            }
+
+            renderChunksPanelBody(container, data, cs);
+            bindChunkPanel(container, cs, reload);
+          }
+
+          reload();
+        }
+
+        function chunkSortHeader(label, col, cs) {
+          const active = cs.sort === col;
+          const cls    = active ? (cs.order === "asc" ? "sort-asc" : "sort-desc") : "sort-none";
+          return `<th class="sortable ${cls}" data-col="${col}">${escHtml(label)} <span class="sort-arrow"></span></th>`;
+        }
+
+        function renderChunksPanelShell(cs) {
+          return `
+            <div class="chunks-toolbar">
+              <input class="chunks-search-input" type="text" placeholder="Поиск по статусу, воркеру…" value="${escHtml(cs.search)}">
+            </div>
+            <div class="chunks-wrap">
+              <table class="chunks-table">
+                <thead class="chunks-thead"><tr>
+                  <th style="width:36px;">#</th>
+                  ${chunkSortHeader("Статус", "status", cs)}
+                  ${chunkSortHeader("Воркер", "assigned_worker_id", cs)}
+                  ${chunkSortHeader("Строк", "rows_processed", cs)}
+                  <th>Скорость</th>
+                  ${chunkSortHeader("Завершение", "completed_at", cs)}
+                </tr></thead>
+                <tbody class="chunks-panel-body"></tbody>
+              </table>
+            </div>
+            <div class="chunks-pager"></div>
+          `;
+        }
+
+        function renderChunksPanelBody(container, data, cs) {
+          const chunks  = data.chunks  || [];
+          const total   = data.total   || 0;
+          const pages   = data.pages   || 1;
+          const page    = data.page    || cs.page;
+          const perPage = data.per_page || cs.per_page;
+
+          // Rebuild sort headers (direction may have changed)
+          const thead = container.querySelector(".chunks-thead");
+          if (thead) {
+            thead.innerHTML = `<tr>
+              <th style="width:36px;">#</th>
+              ${chunkSortHeader("Статус", "status", cs)}
+              ${chunkSortHeader("Воркер", "assigned_worker_id", cs)}
+              ${chunkSortHeader("Строк", "rows_processed", cs)}
+              <th>Скорость</th>
+              ${chunkSortHeader("Завершение", "completed_at", cs)}
+            </tr>`;
+          }
+
+          const tbody = container.querySelector(".chunks-panel-body");
+          if (!tbody) return;
+
+          if (chunks.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:12px;">
+              ${cs.search ? "Нет чанков по запросу «" + escHtml(cs.search) + "»" : "Нет чанков"}
+            </td></tr>`;
+          } else {
+            tbody.innerHTML = chunks.map(function (c, i) {
+              const rowNum = (page - 1) * perPage + i + 1;
+              const worker = c.assigned_worker_id
+                ? escHtml(String(c.assigned_worker_id).slice(-14))
+                : '<span class="muted">—</span>';
+              const spd = c.rows_per_second != null ? formatSpeed(c.rows_per_second) : "—";
+              const fin = c.completed_at ? escHtml(fmtDate(c.completed_at) || "—") : "—";
+              let rows = `<tr>
+                <td class="muted">${rowNum}</td>
+                <td>${chunkBadgeHtml(c.status)}</td>
+                <td class="muted" style="font-size:11px;">${worker}</td>
+                <td>${(c.rows_processed || 0).toLocaleString("ru-RU")}</td>
+                <td>${spd}</td>
+                <td class="muted" style="font-size:11px;">${fin}</td>
+              </tr>`;
+              if (c.error_message) {
+                rows += `<tr><td colspan="6" style="color:#991b1b;font-size:11px;padding:2px 8px 6px;">${escHtml(c.error_message)}</td></tr>`;
+              }
+              return rows;
+            }).join("");
+          }
+
+          // Pagination
+          const pager = container.querySelector(".chunks-pager");
+          if (!pager) return;
+          if (total <= perPage && pages <= 1) {
+            pager.innerHTML = total ? `<span class="chunks-pager-info">Всего: ${total}</span>` : "";
+            return;
+          }
+          const from = (page - 1) * perPage + 1;
+          const to   = Math.min(page * perPage, total);
+          let ph = `<button class="cpg-prev" ${page <= 1 ? "disabled" : ""}>← Пред.</button>`;
+          const maxBtns = 5;
+          let sp = Math.max(1, page - Math.floor(maxBtns / 2));
+          let ep = Math.min(pages, sp + maxBtns - 1);
+          if (ep - sp < maxBtns - 1) sp = Math.max(1, ep - maxBtns + 1);
+          if (sp > 1) ph += `<button class="cpg-num" data-page="1">1</button>` + (sp > 2 ? `<span style="padding:0 3px;color:#9ca3af">…</span>` : "");
+          for (let p = sp; p <= ep; p++) {
+            ph += `<button class="cpg-num${p === page ? " active" : ""}" data-page="${p}">${p}</button>`;
+          }
+          if (ep < pages) {
+            ph += (ep < pages - 1 ? `<span style="padding:0 3px;color:#9ca3af">…</span>` : "") + `<button class="cpg-num" data-page="${pages}">${pages}</button>`;
+          }
+          ph += `<button class="cpg-next" ${page >= pages ? "disabled" : ""}>След. →</button>`;
+          ph += `<span class="chunks-pager-info">${from}–${to} из ${total}</span>`;
+          pager.innerHTML = ph;
+        }
+
+        function bindChunkPanel(container, cs, reload) {
+          // Sort headers
+          container.querySelectorAll(".chunks-table th.sortable").forEach(function (th) {
+            th.addEventListener("click", function () {
+              const col = th.dataset.col;
+              if (cs.sort === col) {
+                cs.order = cs.order === "asc" ? "desc" : "asc";
+              } else {
+                cs.sort  = col;
+                cs.order = "asc";
+              }
+              cs.page = 1;
+              reload();
+            });
+          });
+
+          // Search (debounced)
+          const searchEl = container.querySelector(".chunks-search-input");
+          if (searchEl && !searchEl.dataset.bound) {
+            searchEl.dataset.bound = "1";
+            let timer;
+            searchEl.addEventListener("input", function () {
+              clearTimeout(timer);
+              timer = setTimeout(function () {
+                cs.search = searchEl.value.trim();
+                cs.page = 1;
+                reload();
+              }, 350);
+            });
+          }
+
+          // Pagination buttons
+          const pager = container.querySelector(".chunks-pager");
+          if (!pager) return;
+          const prevBtn = pager.querySelector(".cpg-prev");
+          const nextBtn = pager.querySelector(".cpg-next");
+          if (prevBtn) prevBtn.addEventListener("click", function () { if (cs.page > 1) { cs.page--; reload(); } });
+          if (nextBtn) nextBtn.addEventListener("click", function () { cs.page++; reload(); });
+          pager.querySelectorAll(".cpg-num").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              cs.page = parseInt(btn.dataset.page, 10);
+              reload();
+            });
+          });
         }
 
         /* ─── Row click handler (delegated — body may be re-rendered) ─── */

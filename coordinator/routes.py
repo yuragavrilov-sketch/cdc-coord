@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
@@ -20,28 +19,6 @@ from .status_checks import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _wall_clock_rows_per_second(completed_chunks: list[dict], total_rows: int) -> float | None:
-    """
-    Calculate aggregate throughput using wall-clock time:
-    min(assigned_at) → max(completed_at) across all completed chunks.
-
-    This correctly accounts for parallel workers, unlike summing individual
-    chunk durations (which gives per-worker average, not system throughput).
-    """
-    if not completed_chunks or total_rows == 0:
-        return None
-    starts = [c["assigned_at"] for c in completed_chunks if c.get("assigned_at")]
-    ends = [c["completed_at"] for c in completed_chunks if c.get("completed_at")]
-    if not starts or not ends:
-        return None
-    t_start = min(datetime.fromisoformat(t) for t in starts)
-    t_end = max(datetime.fromisoformat(t) for t in ends)
-    wall_elapsed = (t_end - t_start).total_seconds()
-    if wall_elapsed <= 0:
-        return None
-    return round(total_rows / wall_elapsed, 1)
 
 
 def build_api_blueprint(
@@ -118,25 +95,25 @@ def build_api_blueprint(
     @bp.get("/jobs/<job_id>/chunks")
     def get_job_chunks(job_id: str):
         service.get_job(job_id)  # raises NotFoundError if job doesn't exist
-        chunks = repository.list_chunks(job_id)
+        stats = repository.get_chunk_stats(job_id)
 
-        by_status: dict[str, int] = {}
-        for c in chunks:
-            by_status[c["status"]] = by_status.get(c["status"], 0) + 1
+        per_page = request.args.get("per_page", default=0, type=int)
+        if per_page > 0:
+            per_page = min(per_page, 500)
+            search  = request.args.get("search",  "").strip()
+            sort_by = request.args.get("sort",    "assigned_at")
+            order   = request.args.get("order",   "asc")
+            page    = max(request.args.get("page", default=1, type=int), 1)
+            chunks, total = repository.list_chunks_paginated(
+                job_id, search=search, sort_by=sort_by, order=order, page=page, per_page=per_page,
+            )
+            pages = max(1, (total + per_page - 1) // per_page)
+            return jsonify({
+                "chunks": chunks, "stats": stats,
+                "total": total, "page": page, "per_page": per_page, "pages": pages,
+            }), 200
 
-        completed = [c for c in chunks if c["status"] == "completed"]
-        total_rows_completed = sum(c["rows_processed"] for c in completed)
-        avg_speed = _wall_clock_rows_per_second(completed, total_rows_completed)
-
-        return jsonify({
-            "chunks": chunks,
-            "stats": {
-                "total": len(chunks),
-                "by_status": by_status,
-                "rows_processed": sum(c["rows_processed"] for c in chunks),
-                "avg_rows_per_second": avg_speed,
-            },
-        }), 200
+        return jsonify({"chunks": [], "stats": stats}), 200
 
     @bp.get("/tables")
     def list_tables():
@@ -158,20 +135,49 @@ def build_api_blueprint(
         items = []
         for job in jobs:
             d = job.to_dict()
-            chunks = repository.list_chunks(job.job_id)
-            by_status: dict[str, int] = {}
-            for c in chunks:
-                by_status[c["status"]] = by_status.get(c["status"], 0) + 1
-            completed = [c for c in chunks if c["status"] == "completed"]
-            total_rows = sum(c["rows_processed"] for c in completed)
-            d["_chunk_stats"] = {
-                "total": len(chunks),
-                "by_status": by_status,
-                "rows_processed": sum(c["rows_processed"] for c in chunks),
-                "avg_rows_per_second": _wall_clock_rows_per_second(completed, total_rows),
-            }
+            d["_chunk_stats"] = repository.get_chunk_stats(job.job_id)
             items.append(d)
         return jsonify({"items": items, "count": len(items)}), 200
+
+    @bp.get("/source-tables")
+    def list_source_tables():
+        source_cfg = (
+            OracleClientConfig(
+                dsn=config.oracle_source_dsn,
+                user=config.oracle_source_user,
+                password=config.oracle_source_password,
+            )
+            if config.oracle_source_dsn and config.oracle_source_user and config.oracle_source_password
+            else None
+        )
+        introspector = OracleIntrospector(
+            source=source_cfg,
+            target=None,
+            source_schema=config.oracle_source_schema,
+            target_schema=None,
+        )
+        tables = introspector.list_source_tables()
+        return jsonify({"tables": tables, "schema": config.oracle_source_schema}), 200
+
+    @bp.get("/target-tables")
+    def list_target_tables():
+        target_cfg = (
+            OracleClientConfig(
+                dsn=config.oracle_target_dsn,
+                user=config.oracle_target_user,
+                password=config.oracle_target_password,
+            )
+            if config.oracle_target_dsn and config.oracle_target_user and config.oracle_target_password
+            else None
+        )
+        introspector = OracleIntrospector(
+            source=None,
+            target=target_cfg,
+            source_schema=None,
+            target_schema=config.oracle_target_schema,
+        )
+        tables = introspector.list_target_tables()
+        return jsonify({"tables": tables, "schema": config.oracle_target_schema}), 200
 
     @bp.get("/tables/<path:table_name>/columns")
     def get_table_columns(table_name: str):
