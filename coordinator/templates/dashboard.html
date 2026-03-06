@@ -975,21 +975,26 @@
           return `<th class="sortable ${cls}" data-col="${col}">${escHtml(label)} <span class="sort-arrow"></span></th>`;
         }
 
+        function chunksTheadHtml(cs) {
+          return `<tr>
+            <th style="width:36px;">#</th>
+            ${chunkSortHeader("Статус", "status", cs)}
+            ${chunkSortHeader("Воркер", "assigned_worker_id", cs)}
+            ${chunkSortHeader("Строк", "rows_processed", cs)}
+            <th>Скорость</th>
+            ${chunkSortHeader("Завершение", "completed_at", cs)}
+            <th>Ошибка</th>
+          </tr>`;
+        }
+
         function renderChunksPanelShell(cs) {
           return `
             <div class="chunks-toolbar">
-              <input class="chunks-search-input" type="text" placeholder="Поиск по статусу, воркеру…" value="${escHtml(cs.search)}">
+              <input class="chunks-search-input" type="text" placeholder="Поиск по статусу, воркеру, ошибке…" value="${escHtml(cs.search)}">
             </div>
             <div class="chunks-wrap">
               <table class="chunks-table">
-                <thead class="chunks-thead"><tr>
-                  <th style="width:36px;">#</th>
-                  ${chunkSortHeader("Статус", "status", cs)}
-                  ${chunkSortHeader("Воркер", "assigned_worker_id", cs)}
-                  ${chunkSortHeader("Строк", "rows_processed", cs)}
-                  <th>Скорость</th>
-                  ${chunkSortHeader("Завершение", "completed_at", cs)}
-                </tr></thead>
+                <thead class="chunks-thead">${chunksTheadHtml(cs)}</thead>
                 <tbody class="chunks-panel-body"></tbody>
               </table>
             </div>
@@ -1006,22 +1011,13 @@
 
           // Rebuild sort headers (direction may have changed)
           const thead = container.querySelector(".chunks-thead");
-          if (thead) {
-            thead.innerHTML = `<tr>
-              <th style="width:36px;">#</th>
-              ${chunkSortHeader("Статус", "status", cs)}
-              ${chunkSortHeader("Воркер", "assigned_worker_id", cs)}
-              ${chunkSortHeader("Строк", "rows_processed", cs)}
-              <th>Скорость</th>
-              ${chunkSortHeader("Завершение", "completed_at", cs)}
-            </tr>`;
-          }
+          if (thead) thead.innerHTML = chunksTheadHtml(cs);
 
           const tbody = container.querySelector(".chunks-panel-body");
           if (!tbody) return;
 
           if (chunks.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:12px;">
+            tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;padding:12px;">
               ${cs.search ? "Нет чанков по запросу «" + escHtml(cs.search) + "»" : "Нет чанков"}
             </td></tr>`;
           } else {
@@ -1032,18 +1028,19 @@
                 : '<span class="muted">—</span>';
               const spd = c.rows_per_second != null ? formatSpeed(c.rows_per_second) : "—";
               const fin = c.completed_at ? escHtml(fmtDate(c.completed_at) || "—") : "—";
-              let rows = `<tr>
+              const errCell = c.error_message
+                ? `<td style="color:#991b1b;font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                     title="${escHtml(c.error_message)}">${escHtml(c.error_message.length > 60 ? c.error_message.slice(0, 60) + "…" : c.error_message)}</td>`
+                : `<td class="muted">—</td>`;
+              return `<tr>
                 <td class="muted">${rowNum}</td>
                 <td>${chunkBadgeHtml(c.status)}</td>
                 <td class="muted" style="font-size:11px;">${worker}</td>
                 <td>${(c.rows_processed || 0).toLocaleString("ru-RU")}</td>
                 <td>${spd}</td>
                 <td class="muted" style="font-size:11px;">${fin}</td>
+                ${errCell}
               </tr>`;
-              if (c.error_message) {
-                rows += `<tr><td colspan="6" style="color:#991b1b;font-size:11px;padding:2px 8px 6px;">${escHtml(c.error_message)}</td></tr>`;
-              }
-              return rows;
             }).join("");
           }
 

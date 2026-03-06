@@ -403,9 +403,13 @@ class CoordinatorRepository:
         search_sql = ""
         params: list[Any] = [job_id]
         if search:
-            search_sql = "AND (status ILIKE %s OR COALESCE(assigned_worker_id,'') ILIKE %s)"
+            search_sql = (
+                "AND (status ILIKE %s"
+                " OR COALESCE(assigned_worker_id,'') ILIKE %s"
+                " OR COALESCE(error_message,'') ILIKE %s)"
+            )
             pattern = f"%{search}%"
-            params += [pattern, pattern]
+            params += [pattern, pattern, pattern]
 
         with self._db.connection() as conn:
             with conn.cursor() as cur:
