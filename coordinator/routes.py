@@ -131,8 +131,8 @@ def build_api_blueprint(
 
     @bp.delete("/tables/<path:table_name>")
     def delete_table(table_name: str):
-        deleted = repository.delete_jobs_for_table(table_name)
-        return jsonify({"deleted_jobs": deleted}), 200
+        result = service.delete_jobs_for_table(table_name)
+        return jsonify(result), 200
 
     @bp.get("/tables/<path:table_name>/jobs")
     def get_jobs_for_table(table_name: str):

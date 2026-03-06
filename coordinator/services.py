@@ -168,6 +168,17 @@ class CoordinatorService:
     def list_jobs(self, limit: int = 100) -> list[JobRecord]:
         return self._repository.list_jobs(limit=limit)
 
+    def delete_jobs_for_table(self, table_name: str) -> dict:
+        """Delete all top-level jobs (and their children/connectors) for a source table."""
+        jobs = self._repository.list_jobs_for_table(table_name)
+        top_level = [j for j in jobs if not j.parent_job_id]
+        warnings: list[str] = []
+        for job in top_level:
+            result = self.delete_job(job.job_id)
+            if result.get("debezium_warning"):
+                warnings.append(result["debezium_warning"])
+        return {"deleted_jobs": len(top_level), "debezium_warnings": warnings}
+
     def delete_job(self, job_id: str) -> dict:
         job = self._repository.get_job(job_id)
         debezium_warning: str | None = None

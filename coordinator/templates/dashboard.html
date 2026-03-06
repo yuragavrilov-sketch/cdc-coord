@@ -778,9 +778,6 @@
           html += `<span class="job-card-title">${escHtml(cardLabel)}</span>`;
           html += statusBadgeHtml(job.status);
           html += `<span class="job-card-subtitle">${escHtml(job.job_id)}</span>`;
-          html += `<div class="job-card-header-actions">
-            <button class="btn-danger btn-delete-job" data-job-id="${escHtml(job.job_id)}">Удалить</button>
-          </div>`;
           html += `</div>`;
 
           html += `<table class="detail-table">`;
@@ -816,7 +813,6 @@
             html += `<div class="chunks-detail" data-job-id="${escHtml(job.job_id)}" style="display:none;margin-top:8px;"></div>`;
           }
 
-          html += `<div class="delete-warn warn-box" data-job-id="${escHtml(job.job_id)}" style="display:none;margin-top:8px;"></div>`;
           html += `</div>`;  // .job-card
           return html;
         }
@@ -852,7 +848,7 @@
           const accordionTr = document.createElement("tr");
           accordionTr.className = "accordion-row";
           const td = document.createElement("td");
-          td.colSpan = 6;
+          td.colSpan = 7;
           td.innerHTML = `<div class="accordion-content"><div class="loading">Загрузка данных о jobs…</div></div>`;
           accordionTr.appendChild(td);
           dataRow.after(accordionTr);
@@ -874,14 +870,6 @@
             });
             html += `</div>`;
             td.querySelector(".accordion-content").innerHTML = html;
-
-            // Bind delete buttons
-            accordionTr.querySelectorAll(".btn-delete-job").forEach(function (btn) {
-              btn.addEventListener("click", function (e) {
-                e.stopPropagation();
-                bindDeleteJob(btn, dataRow);
-              });
-            });
 
             // Bind "show chunks" toggle links
             accordionTr.querySelectorAll(".load-chunks-link").forEach(function (link) {
@@ -909,37 +897,6 @@
             td.querySelector(".accordion-content").innerHTML =
               `<p style="color:#991b1b;">Не удалось загрузить jobs: ${escHtml(String(err.message || err))}</p>`;
           }
-        }
-
-        function bindDeleteJob(btn, dataRow) {
-          const jobId = btn.dataset.jobId;
-          if (!confirm("Удалить job " + jobId + "?\n\nЭто действие необратимо.")) return;
-          btn.disabled = true;
-          btn.textContent = "Удаляем…";
-          const warnEl = dataRow.parentElement.querySelector(`.delete-warn[data-job-id="${jobId}"]`);
-
-          fetch("/api/v1/jobs/" + encodeURIComponent(jobId), { method: "DELETE" })
-            .then(function (resp) { return resp.json().then(function (d) { return { resp, d }; }); })
-            .then(function ({ resp, d }) {
-              if (!resp.ok) throw new Error(d.message || d.error || "HTTP " + resp.status);
-              if (d.debezium_warning && warnEl) {
-                warnEl.textContent = "⚠ " + d.debezium_warning;
-                warnEl.style.display = "block";
-                btn.textContent = "Удалён";
-                setTimeout(function () { removeAccordionRow(dataRow); location.reload(); }, 5000);
-              } else {
-                removeAccordionRow(dataRow);
-                location.reload();
-              }
-            })
-            .catch(function (err) {
-              btn.disabled = false;
-              btn.textContent = "Удалить";
-              if (warnEl) {
-                warnEl.textContent = "Ошибка: " + String(err.message || err);
-                warnEl.style.display = "block";
-              }
-            });
         }
 
         /* ─── Chunks section (paginated / sortable / searchable) ─── */
@@ -1132,10 +1089,13 @@
           if (delBtn) {
             e.stopPropagation();
             const tbl = delBtn.dataset.table;
-            if (!confirm(`Удалить все джобы таблицы «${tbl}»?\nДействие необратимо.`)) return;
+            if (!confirm(`Удалить таблицу «${tbl}» и все её jobs?\nКоннекторы Debezium будут удалены автоматически.\nДействие необратимо.`)) return;
             delBtn.disabled = true;
             try {
-              await fetchJson("/api/v1/tables/" + encodeURIComponent(tbl), { method: "DELETE" });
+              const result = await fetchJson("/api/v1/tables/" + encodeURIComponent(tbl), { method: "DELETE" });
+              if (result.debezium_warnings && result.debezium_warnings.length) {
+                alert("⚠ Предупреждения Debezium:\n" + result.debezium_warnings.join("\n\n"));
+              }
               loadTable();
             } catch (err) {
               alert("Ошибка удаления: " + String(err.message || err));
