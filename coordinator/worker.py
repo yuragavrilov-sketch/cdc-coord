@@ -1333,13 +1333,14 @@ class SchemaCompareWorker:
     @staticmethod
     def _fetch_triggers(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
         with conn.cursor() as cur:
+            # ORDER BY is not allowed when selecting a LONG column (trigger_body),
+            # so sort in Python after fetching.
             cur.execute(
                 """
                 SELECT trigger_name, trigger_type, triggering_event, status, action_type,
                        trigger_body
                 FROM all_triggers
                 WHERE owner = :owner AND table_name = :tbl
-                ORDER BY trigger_name
                 """,
                 {"owner": owner, "tbl": table_name},
             )
@@ -1350,6 +1351,7 @@ class SchemaCompareWorker:
                 if hasattr(d.get("trigger_body"), "read"):
                     d["trigger_body"] = d["trigger_body"].read()
                 rows.append(d)
+        rows.sort(key=lambda r: r.get("trigger_name") or "")
         return rows
 
     # ------------------------------------------------------------------
