@@ -152,6 +152,8 @@ class CoordinatorRepository:
                             source_table VARCHAR(200) NOT NULL,
                             target_table VARCHAR(200) NOT NULL,
                             pk_columns JSONB,
+                            compare_mode VARCHAR(20) NOT NULL DEFAULT 'full',
+                            pk_filter_value TEXT,
                             status VARCHAR(20) NOT NULL DEFAULT 'pending',
                             assigned_worker_id VARCHAR(100),
                             assigned_at TIMESTAMP,
@@ -169,7 +171,35 @@ class CoordinatorRepository:
                         " ADD COLUMN IF NOT EXISTS progress_message TEXT"
                     )
                     cur.execute(
+                        "ALTER TABLE migration_system.migration_compare_tasks"
+                        " ADD COLUMN IF NOT EXISTS compare_mode VARCHAR(20) NOT NULL DEFAULT 'full'"
+                    )
+                    cur.execute(
+                        "ALTER TABLE migration_system.migration_compare_tasks"
+                        " ADD COLUMN IF NOT EXISTS pk_filter_value TEXT"
+                    )
+                    cur.execute(
                         "CREATE INDEX IF NOT EXISTS idx_compare_tasks_status ON migration_system.migration_compare_tasks (status)"
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system.migration_schema_tasks (
+                            task_id UUID PRIMARY KEY,
+                            source_table VARCHAR(200) NOT NULL,
+                            target_table VARCHAR(200) NOT NULL,
+                            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                            assigned_worker_id VARCHAR(100),
+                            assigned_at TIMESTAMP,
+                            completed_at TIMESTAMP,
+                            progress_message TEXT,
+                            result JSONB,
+                            error_message TEXT,
+                            created_at TIMESTAMP DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_schema_tasks_status ON migration_system.migration_schema_tasks (status)"
                     )
         except psycopg.errors.UniqueViolation:
             pass  # Another worker already created the schema concurrently
@@ -1116,6 +1146,8 @@ class CoordinatorRepository:
         source_table: str,
         target_table: str,
         pk_columns: list[str] | None = None,
+        compare_mode: str = "full",
+        pk_filter_value: str | None = None,
     ) -> dict[str, Any]:
         task_id = str(uuid.uuid4())
         with self._db.connection() as conn:
@@ -1123,11 +1155,16 @@ class CoordinatorRepository:
                 cur.execute(
                     """
                     INSERT INTO migration_system.migration_compare_tasks
-                        (task_id, source_table, target_table, pk_columns, status, created_at)
-                    VALUES (%s, %s, %s, %s, 'pending', NOW())
+                        (task_id, source_table, target_table, pk_columns,
+                         compare_mode, pk_filter_value, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW())
                     RETURNING *
                     """,
-                    (task_id, source_table, target_table, Json(pk_columns) if pk_columns is not None else None),
+                    (
+                        task_id, source_table, target_table,
+                        Json(pk_columns) if pk_columns is not None else None,
+                        compare_mode, pk_filter_value,
+                    ),
                 )
                 row = cur.fetchone()
         return dict(row)
@@ -1217,6 +1254,111 @@ class CoordinatorRepository:
                 cur.execute(
                     """
                     UPDATE migration_system.migration_compare_tasks
+                    SET status = 'failed', completed_at = NOW(), error_message = %s
+                    WHERE task_id = %s
+                    """,
+                    (error_message[:4000], task_id),
+                )
+
+    # -------------------------------------------------------------------------
+    # Schema comparison tasks
+    # -------------------------------------------------------------------------
+
+    def create_schema_task(self, source_table: str, target_table: str) -> dict[str, Any]:
+        task_id = str(uuid.uuid4())
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO migration_system.migration_schema_tasks
+                        (task_id, source_table, target_table, status, created_at)
+                    VALUES (%s, %s, %s, 'pending', NOW())
+                    RETURNING *
+                    """,
+                    (task_id, source_table, target_table),
+                )
+                row = cur.fetchone()
+        return dict(row)
+
+    def list_schema_tasks(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM migration_system.migration_schema_tasks ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
+                rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+    def get_schema_task(self, task_id: str) -> dict[str, Any]:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM migration_system.migration_schema_tasks WHERE task_id = %s",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise NotFoundError(f"Schema task not found: {task_id}")
+        return dict(row)
+
+    def delete_schema_task(self, task_id: str) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM migration_system.migration_schema_tasks WHERE task_id = %s RETURNING task_id",
+                    (task_id,),
+                )
+                if not cur.fetchone():
+                    raise NotFoundError(f"Schema task not found: {task_id}")
+
+    def claim_schema_task(self, worker_id: str) -> dict[str, Any] | None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_schema_tasks
+                    SET status = 'running', assigned_worker_id = %s, assigned_at = NOW()
+                    WHERE task_id = (
+                        SELECT task_id FROM migration_system.migration_schema_tasks
+                        WHERE status = 'pending'
+                        ORDER BY created_at
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING *
+                    """,
+                    (worker_id,),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def update_schema_task_progress(self, task_id: str, message: str) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE migration_system.migration_schema_tasks SET progress_message = %s WHERE task_id = %s",
+                    (message, task_id),
+                )
+
+    def complete_schema_task(self, task_id: str, result: dict[str, Any]) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_schema_tasks
+                    SET status = 'completed', completed_at = NOW(), result = %s
+                    WHERE task_id = %s
+                    """,
+                    (Json(result), task_id),
+                )
+
+    def fail_schema_task(self, task_id: str, error_message: str) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_schema_tasks
                     SET status = 'failed', completed_at = NOW(), error_message = %s
                     WHERE task_id = %s
                     """,

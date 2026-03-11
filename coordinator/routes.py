@@ -243,7 +243,17 @@ def build_api_blueprint(
         if raw_pk is not None and not isinstance(raw_pk, list):
             raise ValidationError("pk_columns must be an array of strings")
         pk_columns = [str(c).strip() for c in (raw_pk or []) if str(c).strip()] or None
-        task = repository.create_compare_task(source_table, target_table, pk_columns)
+        compare_mode = (payload.get("compare_mode") or "full").strip().lower()
+        if compare_mode not in {"full", "before_pk", "after_pk"}:
+            raise ValidationError("compare_mode must be 'full', 'before_pk', or 'after_pk'")
+        pk_filter_value = (payload.get("pk_filter_value") or "").strip() or None
+        if compare_mode in {"before_pk", "after_pk"} and not pk_filter_value:
+            raise ValidationError("pk_filter_value is required for before_pk / after_pk modes")
+        if compare_mode in {"before_pk", "after_pk"} and not pk_columns:
+            raise ValidationError("pk_columns is required for before_pk / after_pk modes")
+        task = repository.create_compare_task(
+            source_table, target_table, pk_columns, compare_mode, pk_filter_value
+        )
         return jsonify(_serialize_task(task)), 201
 
     @bp.get("/compare-tasks")
@@ -261,6 +271,37 @@ def build_api_blueprint(
     @bp.delete("/compare-tasks/<task_id>")
     def delete_compare_task(task_id: str):
         repository.delete_compare_task(task_id)
+        return jsonify({"deleted": True}), 200
+
+    # ── Schema comparison tasks ────────────────────────────────────────────
+
+    @bp.post("/schema-tasks")
+    def create_schema_task():
+        payload = request.get_json(silent=True) or {}
+        source_table = (payload.get("source_table") or "").strip()
+        target_table = (payload.get("target_table") or "").strip()
+        if not source_table:
+            raise ValidationError("source_table is required")
+        if not target_table:
+            raise ValidationError("target_table is required")
+        task = repository.create_schema_task(source_table, target_table)
+        return jsonify(_serialize_task(task)), 201
+
+    @bp.get("/schema-tasks")
+    def list_schema_tasks():
+        limit = request.args.get("limit", default=100, type=int)
+        limit = min(max(limit, 1), 1000)
+        tasks = repository.list_schema_tasks(limit=limit)
+        return jsonify({"items": [_serialize_task(t) for t in tasks], "count": len(tasks)}), 200
+
+    @bp.get("/schema-tasks/<task_id>")
+    def get_schema_task(task_id: str):
+        task = repository.get_schema_task(task_id)
+        return jsonify(_serialize_task(task)), 200
+
+    @bp.delete("/schema-tasks/<task_id>")
+    def delete_schema_task(task_id: str):
+        repository.delete_schema_task(task_id)
         return jsonify({"deleted": True}), 200
 
     @bp.post("/monitor/run-once")

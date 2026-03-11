@@ -263,6 +263,50 @@
       .pagination button.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
       .pagination-info { font-size: 12px; color: #6b7280; margin-left: 4px; }
 
+      /* Schema compare */
+      .schema-section { margin-top: 32px; border-top: 2px solid #e5e7eb; padding-top: 20px; }
+      .schema-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+      .schema-toolbar h2 { margin: 0; flex-shrink: 0; }
+      .btn-new-schema {
+        padding: 7px 16px; background: #7c3aed; color: #fff;
+        border: none; border-radius: 6px; font-size: 14px;
+        font-weight: 600; cursor: pointer; white-space: nowrap; margin-left: auto;
+      }
+      .btn-new-schema:hover { background: #6d28d9; }
+      .schema-table { width: 100%; border-collapse: collapse; }
+      .schema-table th, .schema-table td { text-align: left; padding: 10px; border-bottom: 1px solid #e5e7eb; }
+      .schema-table th { font-size: 12px; color: #6b7280; text-transform: uppercase; }
+      .schema-accordion-btn {
+        background: none; border: none; cursor: pointer;
+        font-size: 13px; color: #1d4ed8; text-decoration: underline; padding: 0;
+      }
+      .schema-result-panel { display: none; margin-top: 8px; }
+      .schema-result-panel.open { display: block; }
+      .schema-cat { border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 6px; overflow: hidden; }
+      .schema-cat-header {
+        display: flex; align-items: center; gap: 8px;
+        padding: 9px 14px; cursor: pointer; background: #f9fafb; user-select: none;
+      }
+      .schema-cat-header:hover { background: #f3f4f6; }
+      .schema-cat-title { font-weight: 600; font-size: 13px; flex: 1; }
+      .schema-cat-body { padding: 0 14px 10px; font-size: 12px; display: none; }
+      .schema-cat-body.open { display: block; }
+      .schema-cat-body table { width: 100%; border-collapse: collapse; }
+      .schema-cat-body th { text-align: left; padding: 4px 6px; background: #f9fafb; font-size: 11px; color: #6b7280; border-bottom: 1px solid #e5e7eb; }
+      .schema-cat-body td { padding: 4px 6px; border-bottom: 1px solid #f3f4f6; vertical-align: top; word-break: break-all; max-width: 300px; }
+      .schema-cat-body tr:last-child td { border-bottom: none; }
+      .schema-row-diff    { background: #fff7ed; }
+      .schema-row-src     { background: #fff1f2; }
+      .schema-row-tgt     { background: #f0fdf4; }
+      .schema-section-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #9ca3af; padding: 8px 0 2px; }
+      .badge-ok  { background: #d1fae5; color: #065f46; }
+      .badge-bad { background: #fee2e2; color: #991b1b; }
+      .btn-delete-schema {
+        background: none; border: none; cursor: pointer;
+        font-size: 16px; padding: 2px 6px; border-radius: 4px; opacity: 0.55;
+      }
+      .btn-delete-schema:hover { opacity: 1; background: #fee2e2; }
+
       /* Tab navigation */
       .tab-nav { display: flex; gap: 0; border-bottom: 2px solid #e5e7eb; margin-bottom: 20px; }
       .tab-btn {
@@ -380,6 +424,30 @@
           <tr><td colspan="7" class="loading">Загрузка…</td></tr>
         </tbody>
       </table>
+
+      <!-- Schema compare section -->
+      <div class="schema-section">
+        <div class="schema-toolbar">
+          <h2>Сравнение структуры таблиц</h2>
+          <button class="btn-new-schema" id="btn-new-schema">+ Новое сравнение структуры</button>
+        </div>
+        <div id="schema-error" class="error" style="display:none"></div>
+        <table class="schema-table" id="schema-table">
+          <thead>
+            <tr>
+              <th>Source Table</th>
+              <th>Target Table</th>
+              <th>Статус</th>
+              <th>Результат</th>
+              <th>Создана</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="schema-body">
+            <tr><td colspan="6" class="loading">Загрузка…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- Shared overlay -->
@@ -404,6 +472,17 @@
           <button class="btn-close" id="compare-modal-close" title="Закрыть">&#x2715;</button>
         </div>
         <div class="modal-body" id="compare-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Modal: new schema compare task -->
+    <div id="schema-modal" class="modal" role="dialog" aria-modal="true">
+      <div class="modal-box">
+        <div class="modal-header">
+          <h2>Новое сравнение структуры</h2>
+          <button class="btn-close" id="schema-modal-close" title="Закрыть">&#x2715;</button>
+        </div>
+        <div class="modal-body" id="schema-modal-body"></div>
       </div>
     </div>
 
@@ -1384,7 +1463,10 @@
             const pane = document.getElementById("tab-" + btn.dataset.tab);
             if (pane) {
               pane.classList.add("active");
-              if (btn.dataset.tab === "compare") loadCompareTasks();
+              if (btn.dataset.tab === "compare") {
+                loadCompareTasks();
+                loadSchemaTasks();
+              }
             }
           });
         });
@@ -1443,8 +1525,20 @@
                 <select id="cf-target"><option value="">— Загрузка… —</option></select>
               </div>
               <div class="form-group">
-                <label>PK Columns <span class="hint">— через запятую (необязательно)</span></label>
+                <label>PK Columns <span class="hint">— через запятую (обязательно для режимов фильтра)</span></label>
                 <input type="text" id="cf-pk" placeholder="например: ID или ID,ORG_ID">
+              </div>
+              <div class="form-group">
+                <label>Режим сравнения</label>
+                <div class="radio-group">
+                  <label><input type="radio" name="cf-mode" value="full" checked> Полное</label>
+                  <label><input type="radio" name="cf-mode" value="before_pk"> До PK &lt; значение</label>
+                  <label><input type="radio" name="cf-mode" value="after_pk"> После PK &gt; значение</label>
+                </div>
+              </div>
+              <div class="form-group" id="cf-filter-group" style="display:none">
+                <label>Значение PK <span class="hint">— граничный идентификатор</span></label>
+                <input type="text" id="cf-filter-value" placeholder="например: 1000000">
               </div>
               <div id="cmp-form-msg" class="form-error" style="display:none"></div>
               <button type="submit" class="btn-primary" id="cf-submit">Запустить сравнение</button>
@@ -1455,16 +1549,29 @@
         function bindCompareForm() {
           const form = document.getElementById("compare-form");
           if (!form) return;
+
+          // Toggle filter value field visibility
+          form.querySelectorAll("input[name=cf-mode]").forEach(function (r) {
+            r.addEventListener("change", function () {
+              const filterGroup = document.getElementById("cf-filter-group");
+              if (filterGroup) filterGroup.style.display = r.value !== "full" ? "block" : "none";
+            });
+          });
+
           form.addEventListener("submit", async function (e) {
             e.preventDefault();
-            const msgEl = document.getElementById("cmp-form-msg");
-            const btn   = document.getElementById("cf-submit");
-            const src   = document.getElementById("cf-source").value.trim();
-            const tgt   = document.getElementById("cf-target").value.trim();
-            const pkRaw = document.getElementById("cf-pk").value.trim();
+            const msgEl      = document.getElementById("cmp-form-msg");
+            const btn        = document.getElementById("cf-submit");
+            const src        = document.getElementById("cf-source").value.trim();
+            const tgt        = document.getElementById("cf-target").value.trim();
+            const pkRaw      = document.getElementById("cf-pk").value.trim();
+            const mode       = form.querySelector("input[name=cf-mode]:checked").value;
+            const filterVal  = (document.getElementById("cf-filter-value") || {}).value || "";
 
             if (!src) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Source Table"; msgEl.style.display = "block"; return; }
             if (!tgt) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Target Table"; msgEl.style.display = "block"; return; }
+            if (mode !== "full" && !pkRaw.trim()) { msgEl.className = "form-error"; msgEl.textContent = "Укажите PK Columns для фильтрации"; msgEl.style.display = "block"; return; }
+            if (mode !== "full" && !filterVal.trim()) { msgEl.className = "form-error"; msgEl.textContent = "Укажите значение PK"; msgEl.style.display = "block"; return; }
 
             const pkCols = pkRaw ? pkRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
             msgEl.style.display = "none";
@@ -1472,10 +1579,17 @@
             btn.textContent = "Создаём…";
 
             try {
+              const body = {
+                source_table: src,
+                target_table: tgt,
+                pk_columns: pkCols.length ? pkCols : null,
+                compare_mode: mode,
+                pk_filter_value: mode !== "full" ? filterVal.trim() : null,
+              };
               const resp = await fetch("/api/v1/compare-tasks", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ source_table: src, target_table: tgt, pk_columns: pkCols.length ? pkCols : null }),
+                body: JSON.stringify(body),
               });
               const data = await resp.json();
               if (!resp.ok) throw new Error(buildErrorMessage(data));
@@ -1519,6 +1633,14 @@
 
           body.innerHTML = tasks.map(function (t) {
             const pkText = (t.pk_columns && t.pk_columns.length) ? escHtml(t.pk_columns.join(", ")) : '<span class="muted">—</span>';
+            const modeLabels = { full: "Полное", before_pk: "До PK", after_pk: "После PK" };
+            const modeText = modeLabels[t.compare_mode] || escHtml(t.compare_mode || "full");
+            const filterText = t.pk_filter_value ? ` &lt; ${escHtml(String(t.pk_filter_value))}` : "";
+            const afterFilterText = t.pk_filter_value && t.compare_mode === "after_pk"
+              ? ` &gt; ${escHtml(String(t.pk_filter_value))}` : "";
+            const modeHtml = t.compare_mode && t.compare_mode !== "full"
+              ? `<span class="badge badge-other">${modeText}</span><br><span style="font-size:11px;color:#6b7280;">PK${t.compare_mode === "before_pk" ? filterText : afterFilterText}</span>`
+              : `<span class="muted">${modeText}</span>`;
             const createdAt = t.created_at ? escHtml(fmtDate(t.created_at) || t.created_at) : "—";
             const summaryHtml = renderCompareSummary(t);
             const hasDiffs = t.sample_diffs && t.sample_diffs.length > 0;
@@ -1530,7 +1652,7 @@
               <td>${escHtml(t.source_table)}</td>
               <td>${escHtml(t.target_table)}</td>
               <td style="font-size:12px;">${pkText}</td>
-              <td>${statusBadgeHtml(t.status)}</td>
+              <td>${statusBadgeHtml(t.status)}<br><span style="font-size:11px;">${modeHtml}</span></td>
               <td class="compare-result-summary">${summaryHtml}</td>
               <td class="muted" style="font-size:11px;">${createdAt}</td>
               <td style="white-space:nowrap;">
@@ -1574,6 +1696,18 @@
           } else if (s.pk_comparison) {
             html += `<br><span class="muted">${escHtml(String(s.pk_comparison))}</span>`;
           }
+          // column-level comparison results
+          if (s.rows_compared != null) {
+            const rowsWithDiffs = s.rows_with_diffs || 0;
+            const compared = s.rows_compared || 0;
+            if (rowsWithDiffs === 0) {
+              html += `<br><span class="ok">Данные совпадают (проверено ${compared.toLocaleString("ru-RU")} строк)</span>`;
+            } else {
+              const diffCols = (s.differing_columns || []).map(escHtml).join(", ");
+              html += `<br><span class="bad">Расхождения в данных: ${rowsWithDiffs} строк из ${compared.toLocaleString("ru-RU")}</span>`;
+              if (diffCols) html += `<br><span class="muted" style="font-size:11px;">Колонки: ${diffCols}</span>`;
+            }
+          }
           return html;
         }
 
@@ -1596,8 +1730,14 @@
                 try {
                   const diffs = JSON.parse(diffsDiv.dataset.diffs || "[]");
                   diffsDiv.textContent = diffs.map(function (d) {
-                    return d.type + ": " + JSON.stringify(d.pk);
-                  }).join("\n");
+                    if (d.type === "data_mismatch") {
+                      const cols = Object.entries(d.columns || {}).map(function ([col, v]) {
+                        return `  ${col}: src=${v.src}  tgt=${v.tgt}`;
+                      }).join("\n");
+                      return `[data_mismatch] pk=${JSON.stringify(d.pk)}\n${cols}`;
+                    }
+                    return `[${d.type}] pk=${JSON.stringify(d.pk)}`;
+                  }).join("\n\n");
                 } catch { diffsDiv.textContent = "(ошибка парсинга)"; }
               }
             }
@@ -1625,20 +1765,30 @@
           let _cmpPollTimer = null;
 
           function _pollRunningTasks() {
-            const progressSpans = document.querySelectorAll("[id^='prog-']");
-            if (progressSpans.length === 0) return;
-
-            progressSpans.forEach(async function (span) {
+            // Poll compare tasks
+            document.querySelectorAll("[id^='prog-']").forEach(async function (span) {
               const taskId = span.id.replace("prog-", "");
               try {
                 const task = await fetchJson("/api/v1/compare-tasks/" + encodeURIComponent(taskId));
                 if (task.status === "running") {
                   span.textContent = task.progress_message || "выполняется…";
                 } else {
-                  // Task finished — reload the full list
                   loadCompareTasks();
                 }
-              } catch { /* ignore polling errors */ }
+              } catch { /* ignore */ }
+            });
+
+            // Poll schema tasks
+            document.querySelectorAll("[id^='schema-prog-']").forEach(async function (span) {
+              const taskId = span.id.replace("schema-prog-", "");
+              try {
+                const task = await fetchJson("/api/v1/schema-tasks/" + encodeURIComponent(taskId));
+                if (task.status === "running") {
+                  span.textContent = task.progress_message || "выполняется…";
+                } else {
+                  loadSchemaTasks();
+                }
+              } catch { /* ignore */ }
             });
           }
 
@@ -1655,6 +1805,297 @@
             });
           });
         })();
+
+        /* ─── Schema modal ─── */
+        const schemaModal      = document.getElementById("schema-modal");
+        const schemaModalBody  = document.getElementById("schema-modal-body");
+        const schemaModalClose = document.getElementById("schema-modal-close");
+
+        function openSchemaModal() {
+          schemaModalBody.innerHTML = renderSchemaForm();
+          overlay.classList.add("visible");
+          schemaModal.classList.add("visible");
+          bindSchemaForm();
+          Promise.all([
+            fetchJson("/api/v1/source-tables"),
+            fetchJson("/api/v1/target-tables"),
+          ]).then(function ([srcData, tgtData]) {
+            const srcSel = document.getElementById("sf-source");
+            const tgtSel = document.getElementById("sf-target");
+            if (srcSel) populateSelect(srcSel, srcData.tables || [], "");
+            if (tgtSel) populateSelect(tgtSel, tgtData.tables || [], "");
+          }).catch(function (err) {
+            const srcSel = document.getElementById("sf-source");
+            if (srcSel) srcSel.innerHTML = `<option value="">Ошибка: ${escHtml(String(err.message || err))}</option>`;
+          });
+        }
+
+        function closeSchemaModal() {
+          overlay.classList.remove("visible");
+          schemaModal.classList.remove("visible");
+        }
+
+        schemaModalClose.addEventListener("click", closeSchemaModal);
+        document.getElementById("btn-new-schema").addEventListener("click", openSchemaModal);
+
+        // Extend overlay click to close schema modal
+        overlay.addEventListener("click", closeSchemaModal);
+        // Extend ESC key to close schema modal
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") closeSchemaModal();
+        });
+
+        function renderSchemaForm() {
+          return `
+            <form id="schema-form" autocomplete="off">
+              <div class="form-group">
+                <label>Source Table</label>
+                <select id="sf-source"><option value="">— Загрузка… —</option></select>
+              </div>
+              <div class="form-group">
+                <label>Target Table</label>
+                <select id="sf-target"><option value="">— Загрузка… —</option></select>
+              </div>
+              <div id="sf-form-msg" class="form-error" style="display:none"></div>
+              <button type="submit" class="btn-primary" id="sf-submit">Запустить сравнение структуры</button>
+            </form>
+          `;
+        }
+
+        function bindSchemaForm() {
+          const form = document.getElementById("schema-form");
+          if (!form) return;
+          form.addEventListener("submit", async function (e) {
+            e.preventDefault();
+            const msgEl = document.getElementById("sf-form-msg");
+            const btn   = document.getElementById("sf-submit");
+            const src   = document.getElementById("sf-source").value.trim();
+            const tgt   = document.getElementById("sf-target").value.trim();
+            if (!src) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Source Table"; msgEl.style.display = "block"; return; }
+            if (!tgt) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Target Table"; msgEl.style.display = "block"; return; }
+            msgEl.style.display = "none";
+            btn.disabled = true;
+            btn.textContent = "Создаём…";
+            try {
+              const resp = await fetch("/api/v1/schema-tasks", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ source_table: src, target_table: tgt }),
+              });
+              const data = await resp.json();
+              if (!resp.ok) throw new Error(buildErrorMessage(data));
+              msgEl.className = "form-success";
+              msgEl.textContent = "Задача создана: " + (data.task_id || "OK");
+              msgEl.style.display = "block";
+              btn.textContent = "Готово";
+              setTimeout(function () { closeSchemaModal(); loadSchemaTasks(); }, 900);
+            } catch (err) {
+              msgEl.className = "form-error";
+              msgEl.textContent = String(err.message || err);
+              msgEl.style.display = "block";
+              btn.disabled = false;
+              btn.textContent = "Запустить сравнение структуры";
+            }
+          });
+        }
+
+        /* ─── Schema tasks list ─── */
+        async function loadSchemaTasks() {
+          const body  = document.getElementById("schema-body");
+          const errEl = document.getElementById("schema-error");
+          body.innerHTML = `<tr><td colspan="6" class="loading">Загрузка…</td></tr>`;
+          errEl.style.display = "none";
+
+          let data;
+          try {
+            data = await fetchJson("/api/v1/schema-tasks?limit=200");
+          } catch (err) {
+            body.innerHTML = `<tr><td colspan="6" class="muted">Не удалось загрузить задачи</td></tr>`;
+            errEl.textContent = "Ошибка: " + String(err.message || err);
+            errEl.style.display = "block";
+            return;
+          }
+
+          const tasks = data.items || [];
+          if (tasks.length === 0) {
+            body.innerHTML = `<tr><td colspan="6" class="muted">Нет задач сравнения структуры</td></tr>`;
+            return;
+          }
+
+          body.innerHTML = tasks.map(function (t) {
+            const createdAt = t.created_at ? escHtml(fmtDate(t.created_at) || t.created_at) : "—";
+            const overallMatch = t.result && t.result.overall_match;
+            let statusBadge;
+            if (t.status === "running") {
+              statusBadge = `<span class="badge badge-running">running</span>`;
+            } else if (t.status === "completed") {
+              statusBadge = `<span class="badge ${overallMatch ? "badge-done" : "badge-error"}">${overallMatch ? "совпадает" : "расхождения"}</span>`;
+            } else if (t.status === "failed") {
+              statusBadge = `<span class="badge badge-error">ошибка</span>`;
+            } else {
+              statusBadge = `<span class="badge badge-none">${escHtml(t.status || "pending")}</span>`;
+            }
+            let resultHtml;
+            if (t.result) {
+              resultHtml = `<button class="schema-accordion-btn" data-task-id="${escHtml(t.task_id)}">Результаты ▾</button>
+                 <div class="schema-result-panel" id="schema-result-${escHtml(t.task_id)}" data-result="${escHtml(JSON.stringify(t.result))}"></div>`;
+            } else if (t.status === "running") {
+              resultHtml = `<span class="muted" id="schema-prog-${escHtml(t.task_id)}">${escHtml(t.progress_message || "выполняется…")}</span>`;
+            } else if (t.status === "failed" && t.error_message) {
+              resultHtml = `<span style="color:#991b1b;font-size:12px;">${escHtml(String(t.error_message).slice(0, 120))}</span>`;
+            } else {
+              resultHtml = '<span class="muted">—</span>';
+            }
+            return `<tr>
+              <td>${escHtml(t.source_table)}</td>
+              <td>${escHtml(t.target_table)}</td>
+              <td>${statusBadge}</td>
+              <td class="schema-result-cell">${resultHtml}</td>
+              <td class="muted" style="font-size:11px;">${createdAt}</td>
+              <td style="white-space:nowrap;">
+                <button class="btn-delete-schema" data-task-id="${escHtml(t.task_id)}" title="Удалить">&#x1F5D1;</button>
+              </td>
+            </tr>`;
+          }).join("");
+        }
+
+        /* ─── Schema result renderer (collapsible categories) ─── */
+        function renderSchemaResult(result) {
+          const CATEGORIES = [
+            { key: "columns",     label: "Колонки" },
+            { key: "indexes",     label: "Индексы" },
+            { key: "constraints", label: "Ограничения (Constraints)" },
+            { key: "triggers",    label: "Триггеры" },
+          ];
+          let html = "";
+          CATEGORIES.forEach(function (cat) {
+            const data = result[cat.key];
+            if (!data) return;
+            const onlySrc = data.only_in_source || [];
+            const onlyTgt = data.only_in_target || [];
+            const diff    = data.different || [];
+            const match   = data.matching  || [];
+            const total   = onlySrc.length + onlyTgt.length + diff.length + match.length;
+            const badge   = data.match
+              ? `<span class="badge badge-ok">OK</span>`
+              : `<span class="badge badge-bad">расхождение</span>`;
+            html += `<div class="schema-cat">
+              <div class="schema-cat-header">
+                <span class="expand-icon">&#9654;</span>
+                <span class="schema-cat-title">${escHtml(cat.label)}</span>
+                ${badge}
+                <span class="muted" style="font-size:11px;margin-left:4px;">${total} объектов</span>
+              </div>
+              <div class="schema-cat-body">`;
+            if (onlySrc.length > 0) {
+              html += `<div class="schema-section-lbl" style="color:#991b1b;">Только в источнике (${onlySrc.length})</div>`;
+              html += renderSchemaItemTable(onlySrc, "schema-row-src");
+            }
+            if (onlyTgt.length > 0) {
+              html += `<div class="schema-section-lbl" style="color:#065f46;">Только в приёмнике (${onlyTgt.length})</div>`;
+              html += renderSchemaItemTable(onlyTgt, "schema-row-tgt");
+            }
+            if (diff.length > 0) {
+              html += `<div class="schema-section-lbl" style="color:#92400e;">Отличаются (${diff.length})</div>`;
+              html += renderSchemaDiffTable(diff);
+            }
+            if (match.length > 0) {
+              html += `<div class="schema-section-lbl" style="color:#6b7280;">Совпадают (${match.length})</div>`;
+              html += renderSchemaItemTable(match, "");
+            }
+            html += `</div></div>`;
+          });
+          return html;
+        }
+
+        function renderSchemaItemTable(items, rowClass) {
+          if (!items || items.length === 0) return "";
+          const keys = Object.keys(items[0] || {});
+          if (keys.length === 0) return "";
+          let html = `<table><thead><tr>${keys.map(function (k) { return `<th>${escHtml(k)}</th>`; }).join("")}</tr></thead><tbody>`;
+          items.forEach(function (item) {
+            html += `<tr${rowClass ? ` class="${escHtml(rowClass)}"` : ""}>`;
+            keys.forEach(function (k) {
+              const val = item[k];
+              html += `<td>${val == null ? '<span class="muted">—</span>' : escHtml(String(val))}</td>`;
+            });
+            html += `</tr>`;
+          });
+          html += `</tbody></table>`;
+          return html;
+        }
+
+        function renderSchemaDiffTable(items) {
+          if (!items || items.length === 0) return "";
+          const firstSrc = (items[0] || {}).src || {};
+          const keys = Object.keys(firstSrc);
+          if (keys.length === 0) return "";
+          let html = `<table><thead><tr><th>Поле</th><th>Источник</th><th>Приёмник</th></tr></thead><tbody>`;
+          items.forEach(function (item) {
+            const src = item.src || {};
+            const tgt = item.tgt || {};
+            const idKey = keys[0];
+            const identity = src[idKey] != null ? src[idKey] : tgt[idKey];
+            html += `<tr class="schema-row-diff"><td colspan="3" style="font-weight:600;padding-top:8px;">${escHtml(String(idKey))}: ${escHtml(String(identity))}</td></tr>`;
+            keys.forEach(function (k) {
+              const sv = src[k] == null ? "" : String(src[k]);
+              const tv = tgt[k] == null ? "" : String(tgt[k]);
+              const isDiff = sv !== tv;
+              html += `<tr${isDiff ? ` class="schema-row-diff"` : ""}>
+                <td style="color:#6b7280;">${escHtml(k)}</td>
+                <td>${isDiff ? `<span style="color:#991b1b;">${escHtml(sv)}</span>` : escHtml(sv)}</td>
+                <td>${isDiff ? `<span style="color:#065f46;">${escHtml(tv)}</span>` : escHtml(tv)}</td>
+              </tr>`;
+            });
+          });
+          html += `</tbody></table>`;
+          return html;
+        }
+
+        /* ─── Schema table delegated events ─── */
+        document.getElementById("schema-body").addEventListener("click", async function (e) {
+          // Accordion toggle for result panel
+          const accBtn = e.target.closest(".schema-accordion-btn");
+          if (accBtn) {
+            const taskId = accBtn.dataset.taskId;
+            const panel  = document.getElementById("schema-result-" + taskId);
+            if (!panel) return;
+            panel.classList.toggle("open");
+            accBtn.textContent = panel.classList.contains("open") ? "Результаты ▴" : "Результаты ▾";
+            if (panel.classList.contains("open") && !panel.dataset.rendered) {
+              panel.dataset.rendered = "1";
+              try {
+                const result = JSON.parse(panel.dataset.result || "{}");
+                panel.innerHTML = renderSchemaResult(result);
+                // Bind category expand/collapse
+                panel.querySelectorAll(".schema-cat-header").forEach(function (hdr) {
+                  hdr.addEventListener("click", function () {
+                    const catBody = hdr.nextElementSibling;
+                    catBody.classList.toggle("open");
+                    const icon = hdr.querySelector(".expand-icon");
+                    if (icon) icon.style.transform = catBody.classList.contains("open") ? "rotate(90deg)" : "";
+                  });
+                });
+              } catch { panel.textContent = "(ошибка парсинга результата)"; }
+            }
+            return;
+          }
+
+          // Delete schema task
+          const delBtn = e.target.closest(".btn-delete-schema");
+          if (delBtn) {
+            const taskId = delBtn.dataset.taskId;
+            if (!confirm("Удалить задачу сравнения структуры?")) return;
+            delBtn.disabled = true;
+            try {
+              await fetchJson("/api/v1/schema-tasks/" + encodeURIComponent(taskId), { method: "DELETE" });
+              loadSchemaTasks();
+            } catch (err) {
+              alert("Ошибка удаления: " + String(err.message || err));
+              delBtn.disabled = false;
+            }
+          }
+        });
 
       })();
     </script>

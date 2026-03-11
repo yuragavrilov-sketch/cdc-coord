@@ -827,13 +827,18 @@ class CompareWorker:
         source_table = str(task["source_table"])
         target_table = str(task["target_table"])
         pk_columns: list[str] = list(task.get("pk_columns") or [])
+        compare_mode: str = str(task.get("compare_mode") or "full")
+        pk_filter_value: str | None = task.get("pk_filter_value") or None
 
         logger.info(
             "Compare task claimed",
-            extra={"task_id": task_id, "source_table": source_table, "worker_id": self._worker_id},
+            extra={"task_id": task_id, "source_table": source_table,
+                   "compare_mode": compare_mode, "worker_id": self._worker_id},
         )
         try:
-            result_summary, sample_diffs = self._compare_tables(task_id, source_table, target_table, pk_columns)
+            result_summary, sample_diffs = self._compare_tables(
+                task_id, source_table, target_table, pk_columns, compare_mode, pk_filter_value
+            )
             self._repository.complete_compare_task(task_id, result_summary, sample_diffs)
             logger.info("Compare task completed", extra={"task_id": task_id, "summary": result_summary})
         except Exception as exc:
@@ -856,12 +861,33 @@ class CompareWorker:
         logger.info("Compare progress: %s", message, extra={"task_id": task_id})
         self._repository.update_compare_task_progress(task_id, message)
 
+    @staticmethod
+    def _build_filter(
+        pk_columns: list[str],
+        compare_mode: str,
+        pk_filter_value: str | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Return (WHERE clause, bind params) for the given mode.
+
+        Modes:
+          full       — no filter
+          before_pk  — WHERE first_pk_col < :pk_filter
+          after_pk   — WHERE first_pk_col > :pk_filter
+        """
+        if compare_mode == "full" or not pk_columns or not pk_filter_value:
+            return "", {}
+        pk_col = pk_columns[0]
+        op = "<" if compare_mode == "before_pk" else ">"
+        return f' WHERE "{pk_col}" {op} :pk_filter', {"pk_filter": pk_filter_value}
+
     def _compare_tables(
         self,
         task_id: str,
         source_table: str,
         target_table: str,
         pk_columns: list[str],
+        compare_mode: str = "full",
+        pk_filter_value: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         src_dsn, src_user, src_pwd = _source_cfg(self._config)
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
@@ -869,16 +895,24 @@ class CompareWorker:
         src_qual = self._qualify(source_table, self._config.oracle_source_schema)
         tgt_qual = self._qualify(target_table, self._config.oracle_target_schema)
 
-        self._progress(task_id, "Подключение к базам данных…")
+        where_clause, filter_params = self._build_filter(pk_columns, compare_mode, pk_filter_value)
+
+        mode_label = {
+            "full": "полное",
+            "before_pk": f"до PK={pk_filter_value}",
+            "after_pk": f"после PK={pk_filter_value}",
+        }.get(compare_mode, compare_mode)
+
+        self._progress(task_id, f"Подключение к базам данных… (режим: {mode_label})")
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn, \
              _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
 
             self._progress(task_id, "Подсчёт строк в source…")
-            src_count = self._count_rows(src_conn, src_qual)
+            src_count = self._count_rows(src_conn, src_qual, where_clause, filter_params)
 
             self._progress(task_id, f"Source: {src_count:,} строк. Подсчёт строк в target…")
-            tgt_count = self._count_rows(tgt_conn, tgt_qual)
+            tgt_count = self._count_rows(tgt_conn, tgt_qual, where_clause, filter_params)
 
             count_diff = src_count - tgt_count
             count_msg = "совпадает" if count_diff == 0 else f"разница {count_diff:+,}"
@@ -889,6 +923,8 @@ class CompareWorker:
             )
 
             result_summary: dict[str, Any] = {
+                "compare_mode": compare_mode,
+                "pk_filter_value": pk_filter_value,
                 "source_count": src_count,
                 "target_count": tgt_count,
                 "count_match": src_count == tgt_count,
@@ -900,9 +936,10 @@ class CompareWorker:
                 result_summary["pk_comparison"] = "skipped — no PK columns specified"
                 return result_summary, sample_diffs
 
-            self._progress(task_id, f"Загрузка PK из source (до 10 000)…")
+            self._progress(task_id, "Загрузка PK из source (до 10 000)…")
             missing_in_target = self._find_missing_pks(
                 src_conn, tgt_conn, src_qual, tgt_qual, pk_columns,
+                where_clause=where_clause, filter_params=filter_params,
                 progress_cb=lambda n: self._progress(
                     task_id, f"Поиск отсутствующих в target: проверено ~{n:,} PK…"
                 ),
@@ -914,6 +951,7 @@ class CompareWorker:
             )
             missing_in_source = self._find_missing_pks(
                 tgt_conn, src_conn, tgt_qual, src_qual, pk_columns,
+                where_clause=where_clause, filter_params=filter_params,
                 progress_cb=lambda n: self._progress(
                     task_id, f"Поиск отсутствующих в source: проверено ~{n:,} PK…"
                 ),
@@ -928,12 +966,35 @@ class CompareWorker:
             for pk_val in missing_in_source[: self._MAX_SAMPLE]:
                 sample_diffs.append({"type": "missing_in_source", "pk": pk_val})
 
+            # Phase 3: column-level comparison for matched rows
+            self._progress(task_id, "Сравнение значений колонок (выборка совпадающих строк)…")
+            col_diffs, differing_cols, rows_compared = self._compare_row_values(
+                src_conn, tgt_conn, src_qual, tgt_qual, pk_columns,
+                where_clause=where_clause, filter_params=filter_params,
+                progress_cb=lambda n: self._progress(
+                    task_id, f"Сравнение значений: проверено {n} строк…"
+                ),
+            )
+            result_summary["rows_compared"] = rows_compared
+            result_summary["rows_with_diffs"] = len(col_diffs)
+            result_summary["differing_columns"] = differing_cols
+            for diff in col_diffs[: self._MAX_SAMPLE]:
+                sample_diffs.append({"type": "data_mismatch", **diff})
+
         return result_summary, sample_diffs
 
     @staticmethod
-    def _count_rows(conn: Any, qualified_table: str) -> int:
+    def _count_rows(
+        conn: Any,
+        qualified_table: str,
+        where_clause: str = "",
+        filter_params: dict[str, Any] | None = None,
+    ) -> int:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {qualified_table}")  # noqa: S608
+            cur.execute(
+                f"SELECT COUNT(*) FROM {qualified_table}{where_clause}",  # noqa: S608
+                filter_params or {},
+            )
             row = cur.fetchone()
         return int(row[0])
 
@@ -944,13 +1005,18 @@ class CompareWorker:
         source_qual: str,
         check_qual: str,
         pk_columns: list[str],
+        where_clause: str = "",
+        filter_params: dict[str, Any] | None = None,
         progress_cb: Any = None,
     ) -> list[Any]:
         """Return PK values present in source_conn but absent in check_conn (up to 2×MAX_SAMPLE)."""
         pk_cols_sql = ", ".join(f'"{c}"' for c in pk_columns)
 
         with source_conn.cursor() as cur:
-            cur.execute(f"SELECT {pk_cols_sql} FROM {source_qual}")  # noqa: S608
+            cur.execute(
+                f"SELECT {pk_cols_sql} FROM {source_qual}{where_clause}",  # noqa: S608
+                filter_params or {},
+            )
             source_pks = cur.fetchmany(10000)
 
         if not source_pks:
@@ -992,3 +1058,410 @@ class CompareWorker:
                 progress_cb(checked)
 
         return missing
+
+    # Maximum number of rows to fetch per side for column-level comparison.
+    _MAX_ROWS_COMPARE = 1000
+
+    def _compare_row_values(
+        self,
+        src_conn: Any,
+        tgt_conn: Any,
+        src_qual: str,
+        tgt_qual: str,
+        pk_columns: list[str],
+        where_clause: str = "",
+        filter_params: dict[str, Any] | None = None,
+        progress_cb: Any = None,
+    ) -> tuple[list[dict[str, Any]], list[str], int]:
+        """Compare column values for rows present on both sides.
+
+        Returns:
+            col_diffs   — list of per-row diffs (pk + column differences)
+            diff_cols   — sorted list of column names that had any difference
+            rows_compared — how many rows were actually compared
+        """
+        pk_cols_sql = ", ".join(f'"{c}"' for c in pk_columns)
+
+        # Fetch column names from source
+        src_schema, src_table = (src_qual.strip('"').split('"."') + [""])[:2]
+        with src_conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM all_tab_columns"
+                " WHERE owner = :owner AND table_name = :tbl"
+                " ORDER BY column_id",
+                {"owner": src_schema.upper(), "tbl": src_table.upper()},
+            )
+            all_columns: list[str] = [r[0] for r in cur.fetchall()]
+
+        if not all_columns:
+            # Fallback: derive columns from a SELECT * with zero rows
+            with src_conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM {src_qual} WHERE 1=0")  # noqa: S608
+                all_columns = [d[0] for d in cur.description]
+
+        non_pk = [c for c in all_columns if c.upper() not in {p.upper() for p in pk_columns}]
+        all_cols_sql = ", ".join(f'"{c}"' for c in all_columns)
+        col_idx = {c.upper(): i for i, c in enumerate(all_columns)}
+
+        # Fetch a sample of rows from source (up to _MAX_ROWS_COMPARE), respecting the filter
+        if where_clause:
+            sample_sql = (
+                f"SELECT {all_cols_sql} FROM {src_qual}{where_clause}"  # noqa: S608
+                f" AND ROWNUM <= :_rownum_limit"
+            )
+            sample_params = {**(filter_params or {}), "_rownum_limit": self._MAX_ROWS_COMPARE}
+        else:
+            sample_sql = f"SELECT {all_cols_sql} FROM {src_qual} WHERE ROWNUM <= :_rownum_limit"  # noqa: S608
+            sample_params = {"_rownum_limit": self._MAX_ROWS_COMPARE}
+
+        with src_conn.cursor() as cur:
+            cur.execute(sample_sql, sample_params)
+            src_rows = cur.fetchall()
+
+        if not src_rows:
+            return [], [], 0
+
+        # Build PK → full row dict for source
+        def pk_key(row: Any) -> tuple:
+            return tuple(row[col_idx[p.upper()]] for p in pk_columns)
+
+        src_by_pk: dict[tuple, Any] = {pk_key(r): r for r in src_rows}
+
+        # Fetch matching rows from target in one query
+        if len(pk_columns) == 1:
+            placeholders = ", ".join(f":{j + 1}" for j in range(len(src_rows)))
+            pk_vals = [r[col_idx[pk_columns[0].upper()]] for r in src_rows]
+            fetch_sql = (
+                f'SELECT {all_cols_sql} FROM {tgt_qual}'  # noqa: S608
+                f' WHERE "{pk_columns[0]}" IN ({placeholders})'
+            )
+            fetch_params: list[Any] = pk_vals
+        else:
+            conditions = " OR ".join(
+                "(" + " AND ".join(
+                    f'"{c}" = :{j * len(pk_columns) + k + 1}'
+                    for k, c in enumerate(pk_columns)
+                ) + ")"
+                for j in range(len(src_rows))
+            )
+            fetch_sql = f"SELECT {all_cols_sql} FROM {tgt_qual} WHERE {conditions}"  # noqa: S608
+            fetch_params = [r[col_idx[c.upper()]] for r in src_rows for c in pk_columns]
+
+        with tgt_conn.cursor() as cur:
+            cur.execute(fetch_sql, fetch_params)
+            tgt_rows = cur.fetchall()
+
+        tgt_by_pk: dict[tuple, Any] = {pk_key(r): r for r in tgt_rows}
+
+        col_diffs: list[dict[str, Any]] = []
+        diff_col_set: set[str] = set()
+        rows_compared = 0
+
+        for pk, src_row in src_by_pk.items():
+            tgt_row = tgt_by_pk.get(pk)
+            if tgt_row is None:
+                continue  # already captured as missing_in_target
+
+            rows_compared += 1
+            row_diffs: dict[str, dict[str, Any]] = {}
+            for col in non_pk:
+                idx = col_idx[col.upper()]
+                sv = src_row[idx]
+                tv = tgt_row[idx]
+                # Normalize: compare string representations to handle LOB / numeric edge cases
+                if str(sv) != str(tv):
+                    row_diffs[col] = {"src": str(sv)[:200], "tgt": str(tv)[:200]}
+                    diff_col_set.add(col)
+
+            if row_diffs:
+                pk_repr = list(pk) if len(pk_columns) > 1 else pk[0]
+                col_diffs.append({"pk": pk_repr, "columns": row_diffs})
+
+            if progress_cb and rows_compared % 100 == 0:
+                progress_cb(rows_compared)
+
+            if len(col_diffs) >= self._MAX_SAMPLE * 2:
+                break
+
+        return col_diffs, sorted(diff_col_set), rows_compared
+
+
+# ---------------------------------------------------------------------------
+# SchemaCompareWorker — compares DDL objects between source and target Oracle
+# ---------------------------------------------------------------------------
+
+
+class SchemaCompareWorker:
+    """Compares table DDL objects (columns, indexes, constraints, triggers)
+    between source and target Oracle databases.
+
+    Start with WORKER_TYPE=schema_compare.
+    """
+
+    def __init__(
+        self,
+        worker_id: str,
+        config: AppConfig,
+        repository: CoordinatorRepository,
+    ) -> None:
+        self._worker_id = worker_id
+        self._config = config
+        self._repository = repository
+        self._shutdown_event = threading.Event()
+
+    def shutdown(self) -> None:
+        logger.info("SchemaCompareWorker shutdown requested", extra={"worker_id": self._worker_id})
+        self._shutdown_event.set()
+
+    def run(self) -> None:
+        signal.signal(signal.SIGTERM, lambda *_: self.shutdown())
+        signal.signal(signal.SIGINT, lambda *_: self.shutdown())
+        logger.info("SchemaCompareWorker started", extra={"worker_id": self._worker_id})
+
+        while not self._shutdown_event.is_set():
+            try:
+                if self._try_work():
+                    continue
+                self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
+            except Exception:
+                logger.exception("SchemaCompareWorker error", extra={"worker_id": self._worker_id})
+                self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
+
+        logger.info("SchemaCompareWorker stopped", extra={"worker_id": self._worker_id})
+
+    def _try_work(self) -> bool:
+        task = self._repository.claim_schema_task(self._worker_id)
+        if not task:
+            return False
+
+        task_id = str(task["task_id"])
+        source_table = str(task["source_table"])
+        target_table = str(task["target_table"])
+
+        logger.info(
+            "Schema task claimed",
+            extra={"task_id": task_id, "source_table": source_table, "worker_id": self._worker_id},
+        )
+        try:
+            result = self._compare_schema(task_id, source_table, target_table)
+            self._repository.complete_schema_task(task_id, result)
+            logger.info("Schema task completed", extra={"task_id": task_id})
+        except Exception as exc:
+            logger.exception("Schema task failed", extra={"task_id": task_id})
+            self._repository.fail_schema_task(task_id, str(exc))
+        return True
+
+    def _progress(self, task_id: str, message: str) -> None:
+        logger.info("Schema compare progress: %s", message, extra={"task_id": task_id})
+        self._repository.update_schema_task_progress(task_id, message)
+
+    # ------------------------------------------------------------------
+    # Oracle introspection helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve(table_name: str, default_schema: str | None) -> tuple[str, str]:
+        if "." in table_name:
+            owner, tbl = table_name.split(".", 1)
+        else:
+            if not default_schema:
+                raise ValidationError(
+                    f"Table '{table_name}' has no schema prefix and no default schema is configured"
+                )
+            owner, tbl = default_schema, table_name
+        return owner.strip().strip('"').upper(), tbl.strip().strip('"').upper()
+
+    @staticmethod
+    def _fetch_columns(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name, data_type, data_length, data_precision, data_scale,
+                       nullable, data_default, char_length, column_id
+                FROM all_tab_columns
+                WHERE owner = :owner AND table_name = :tbl
+                ORDER BY column_id
+                """,
+                {"owner": owner, "tbl": table_name},
+            )
+            cols = [d[0].lower() for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    @staticmethod
+    def _fetch_indexes(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.index_name, i.uniqueness, i.index_type, i.status,
+                       LISTAGG(c.column_name || ':' || c.descend, ',')
+                           WITHIN GROUP (ORDER BY c.column_position) AS columns
+                FROM all_indexes i
+                JOIN all_ind_columns c
+                  ON c.index_owner = i.owner AND c.index_name = i.index_name
+                WHERE i.owner = :owner AND i.table_name = :tbl
+                GROUP BY i.index_name, i.uniqueness, i.index_type, i.status
+                ORDER BY i.index_name
+                """,
+                {"owner": owner, "tbl": table_name},
+            )
+            cols = [d[0].lower() for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    @staticmethod
+    def _fetch_constraints(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.constraint_name, c.constraint_type, c.status,
+                       c.validated, c.search_condition, c.r_owner, c.r_constraint_name,
+                       LISTAGG(cc.column_name, ',')
+                           WITHIN GROUP (ORDER BY cc.position) AS columns
+                FROM all_constraints c
+                LEFT JOIN all_cons_columns cc
+                  ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+                WHERE c.owner = :owner AND c.table_name = :tbl
+                  AND c.constraint_type IN ('P','U','C','R')
+                GROUP BY c.constraint_name, c.constraint_type, c.status,
+                         c.validated, c.search_condition, c.r_owner, c.r_constraint_name
+                ORDER BY c.constraint_type, c.constraint_name
+                """,
+                {"owner": owner, "tbl": table_name},
+            )
+            cols = [d[0].lower() for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    @staticmethod
+    def _fetch_triggers(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trigger_name, trigger_type, triggering_event, status, action_type,
+                       trigger_body
+                FROM all_triggers
+                WHERE owner = :owner AND table_name = :tbl
+                ORDER BY trigger_name
+                """,
+                {"owner": owner, "tbl": table_name},
+            )
+            cols = [d[0].lower() for d in cur.description]
+            rows = []
+            for row in cur.fetchall():
+                d = dict(zip(cols, row))
+                if hasattr(d.get("trigger_body"), "read"):
+                    d["trigger_body"] = d["trigger_body"].read()
+                rows.append(d)
+        return rows
+
+    # ------------------------------------------------------------------
+    # Comparison helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compare_category(
+        src_items: list[dict[str, Any]],
+        tgt_items: list[dict[str, Any]],
+        key_field: str,
+        ignore_fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        ignore = set(ignore_fields or [])
+        src_map = {str(item[key_field]): item for item in src_items}
+        tgt_map = {str(item[key_field]): item for item in tgt_items}
+
+        only_src = [src_map[k] for k in src_map if k not in tgt_map]
+        only_tgt = [tgt_map[k] for k in tgt_map if k not in src_map]
+        different = []
+        matching = []
+
+        for key in src_map:
+            if key not in tgt_map:
+                continue
+            src_cmp = {k: (str(v).strip() if v is not None else None)
+                       for k, v in src_map[key].items() if k not in ignore}
+            tgt_cmp = {k: (str(v).strip() if v is not None else None)
+                       for k, v in tgt_map[key].items() if k not in ignore}
+            if src_cmp != tgt_cmp:
+                diffs = {
+                    f: {"src": src_cmp.get(f), "tgt": tgt_cmp.get(f)}
+                    for f in set(src_cmp) | set(tgt_cmp)
+                    if src_cmp.get(f) != tgt_cmp.get(f)
+                }
+                different.append({
+                    "key": key,
+                    "src": src_map[key],
+                    "tgt": tgt_map[key],
+                    "diffs": diffs,
+                })
+            else:
+                matching.append(src_map[key])
+
+        return {
+            "match": not only_src and not only_tgt and not different,
+            "only_in_source": only_src,
+            "only_in_target": only_tgt,
+            "different": different,
+            "matching": matching,
+        }
+
+    # ------------------------------------------------------------------
+    # Main comparison
+    # ------------------------------------------------------------------
+
+    def _compare_schema(
+        self,
+        task_id: str,
+        source_table: str,
+        target_table: str,
+    ) -> dict[str, Any]:
+        src_dsn, src_user, src_pwd = _source_cfg(self._config)
+        tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
+
+        src_owner, src_tbl = self._resolve(source_table, self._config.oracle_source_schema)
+        tgt_owner, tgt_tbl = self._resolve(target_table, self._config.oracle_target_schema)
+
+        self._progress(task_id, "Подключение к базам данных...")
+
+        with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn, \
+             _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
+
+            self._progress(task_id, "Сравнение колонок...")
+            columns = self._compare_category(
+                self._fetch_columns(src_conn, src_owner, src_tbl),
+                self._fetch_columns(tgt_conn, tgt_owner, tgt_tbl),
+                "column_name", ignore_fields=["column_id"],
+            )
+
+            self._progress(task_id, "Сравнение индексов...")
+            indexes = self._compare_category(
+                self._fetch_indexes(src_conn, src_owner, src_tbl),
+                self._fetch_indexes(tgt_conn, tgt_owner, tgt_tbl),
+                "index_name",
+            )
+
+            self._progress(task_id, "Сравнение ограничений (constraints)...")
+            constraints = self._compare_category(
+                self._fetch_constraints(src_conn, src_owner, src_tbl),
+                self._fetch_constraints(tgt_conn, tgt_owner, tgt_tbl),
+                "constraint_name", ignore_fields=["r_owner", "r_constraint_name"],
+            )
+
+            self._progress(task_id, "Сравнение триггеров...")
+            triggers = self._compare_category(
+                self._fetch_triggers(src_conn, src_owner, src_tbl),
+                self._fetch_triggers(tgt_conn, tgt_owner, tgt_tbl),
+                "trigger_name",
+            )
+
+        overall_match = all(
+            cat["match"] for cat in [columns, indexes, constraints, triggers]
+        )
+        self._progress(task_id, "Готово.")
+
+        return {
+            "overall_match": overall_match,
+            "source_table": f"{src_owner}.{src_tbl}",
+            "target_table": f"{tgt_owner}.{tgt_tbl}",
+            "columns": columns,
+            "indexes": indexes,
+            "constraints": constraints,
+            "triggers": triggers,
+        }
