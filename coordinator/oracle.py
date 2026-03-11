@@ -208,12 +208,13 @@ class OracleIntrospector:
                 )
                 pk_rows = cur.fetchall()
 
-                # Find columns with disabled NOT NULL check constraints
-                # (NOT NULL DISABLE: all_tab_cols.nullable = 'Y' but constraint exists)
-                # search_condition is LONG type — oracledb returns it as str
+                # Find columns with disabled NOT NULL check constraints.
+                # search_condition is LONG in all_constraints — cannot be used in JOIN,
+                # GROUP BY, ORDER BY, or subqueries. Fetch it in a separate plain SELECT
+                # and merge with column names in Python.
                 cur.execute(
                     """
-                    SELECT acc.column_name, ac.search_condition
+                    SELECT acc.column_name, ac.constraint_name
                     FROM all_constraints ac
                     JOIN all_cons_columns acc
                       ON ac.owner = acc.owner
@@ -227,7 +228,26 @@ class OracleIntrospector:
                     owner=schema,
                     table_name=table,
                 )
-                disabled_check_rows = cur.fetchall()
+                col_to_cname = {col: cname for col, cname in cur.fetchall()}
+
+                cur.execute(
+                    """
+                    SELECT constraint_name, search_condition
+                    FROM all_constraints
+                    WHERE owner = :owner
+                      AND table_name = :table_name
+                      AND constraint_type = 'C'
+                      AND status = 'DISABLED'
+                    """,
+                    owner=schema,
+                    table_name=table,
+                )
+                search_by_cname = {cname: sc for cname, sc in cur.fetchall()}
+
+                disabled_check_rows = [
+                    (col, search_by_cname.get(cname))
+                    for col, cname in col_to_cname.items()
+                ]
 
         # Columns that appear nullable in all_tab_cols but have a disabled NOT NULL constraint
         disabled_not_null: set[str] = set()

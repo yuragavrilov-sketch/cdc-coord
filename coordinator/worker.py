@@ -1309,16 +1309,15 @@ class SchemaCompareWorker:
 
     @staticmethod
     def _fetch_constraints(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
+        # Two separate queries because search_condition is LONG in all_constraints.
+        # LONG columns cannot appear in GROUP BY, ORDER BY, subqueries, or with TO_CHAR()
+        # in most Oracle query forms. We fetch the LONG column in a plain SELECT and
+        # merge the result into the main rows in Python.
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT c.constraint_name, c.constraint_type, c.status,
-                       c.validated,
-                       (SELECT TO_CHAR(c2.search_condition)
-                          FROM all_constraints c2
-                         WHERE c2.owner = c.owner
-                           AND c2.constraint_name = c.constraint_name) AS search_condition,
-                       c.r_owner, c.r_constraint_name,
+                       c.validated, c.r_owner, c.r_constraint_name,
                        LISTAGG(cc.column_name, ',')
                            WITHIN GROUP (ORDER BY cc.position) AS columns
                 FROM all_constraints c
@@ -1333,7 +1332,25 @@ class SchemaCompareWorker:
                 {"owner": owner, "tbl": table_name},
             )
             cols = [d[0].lower() for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+            # Fetch search_condition (LONG) in a plain SELECT — no GROUP BY / ORDER BY.
+            cur.execute(
+                """
+                SELECT constraint_name, search_condition
+                FROM all_constraints
+                WHERE owner = :owner AND table_name = :tbl
+                  AND constraint_type IN ('P','U','C','R')
+                """,
+                {"owner": owner, "tbl": table_name},
+            )
+            search_map: dict[str, str] = {}
+            for cname, sc in cur.fetchall():
+                search_map[cname] = str(sc) if sc is not None else None
+
+        for row in rows:
+            row["search_condition"] = search_map.get(row["constraint_name"])
+        return rows
 
     @staticmethod
     def _fetch_triggers(conn: Any, owner: str, table_name: str) -> list[dict[str, Any]]:
