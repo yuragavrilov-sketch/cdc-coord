@@ -39,5 +39,17 @@ services:
     restart: unless-stopped
     # Scale with: docker compose up --scale worker=4
 
+  worker-compare:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    environment:
+      WORKER_TYPE: compare
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:

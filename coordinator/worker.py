@@ -841,6 +841,17 @@ class CompareWorker:
             self._repository.fail_compare_task(task_id, str(exc))
         return True
 
+    @staticmethod
+    def _qualify(table_name: str, default_schema: str | None) -> str:
+        """Return "SCHEMA"."TABLE" — adds default_schema if no dot in table_name."""
+        if "." not in table_name:
+            if not default_schema:
+                raise ValidationError(
+                    f"Table '{table_name}' has no schema prefix and no default schema is configured"
+                )
+            return f'"{default_schema.upper()}"."{table_name.upper()}"'
+        return _qualified_table(table_name)
+
     def _compare_tables(
         self,
         source_table: str,
@@ -850,8 +861,8 @@ class CompareWorker:
         src_dsn, src_user, src_pwd = _source_cfg(self._config)
         tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
 
-        src_qual = _qualified_table(source_table)
-        tgt_qual = _qualified_table(target_table)
+        src_qual = self._qualify(source_table, self._config.oracle_source_schema)
+        tgt_qual = self._qualify(target_table, self._config.oracle_target_schema)
 
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn, \
              _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
