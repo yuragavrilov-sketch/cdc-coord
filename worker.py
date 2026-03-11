@@ -5,7 +5,7 @@ from coordinator.config import AppConfig
 from coordinator.db import Database
 from coordinator.logging_config import configure_logging
 from coordinator.repositories import CoordinatorRepository
-from coordinator.worker import BulkWorker, CDCWorker, MigrationWorker
+from coordinator.worker import BulkWorker, CDCWorker, CompareWorker, MigrationWorker
 
 
 def _make_worker_id() -> str:
@@ -25,15 +25,18 @@ def main() -> None:
     worker_id = os.getenv("WORKER_ID") or _make_worker_id()
 
     # WORKER_TYPE controls the role of this process:
-    #   bulk  — processes ROWID chunks only (run 4+ of these)
-    #   cdc   — handles CDC streams for multiple tables simultaneously (run 2+ of these)
-    #   mixed — legacy: bulk + CDC in one process (default, backward-compatible)
+    #   bulk    — processes ROWID chunks only (run 4+ of these)
+    #   cdc     — handles CDC streams for multiple tables simultaneously (run 2+ of these)
+    #   compare — compares table contents between source and target Oracle
+    #   mixed   — legacy: bulk + CDC in one process (default, backward-compatible)
     worker_type = os.getenv("WORKER_TYPE", "mixed").lower().strip()
 
     if worker_type == "cdc":
         worker = CDCWorker(worker_id=worker_id, config=config, repository=repository)
     elif worker_type == "bulk":
         worker = BulkWorker(worker_id=worker_id, config=config, repository=repository)
+    elif worker_type == "compare":
+        worker = CompareWorker(worker_id=worker_id, config=config, repository=repository)
     else:
         worker = MigrationWorker(worker_id=worker_id, config=config, repository=repository)
 

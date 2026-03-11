@@ -21,6 +21,22 @@ from .status_checks import (
 logger = logging.getLogger(__name__)
 
 
+def _serialize_task(task: dict) -> dict:
+    """Convert psycopg Row / dict with datetime / UUID fields to JSON-safe dict."""
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    result = {}
+    for k, v in task.items():
+        if isinstance(v, _dt):
+            result[k] = v.isoformat()
+        elif isinstance(v, _uuid.UUID):
+            result[k] = str(v)
+        else:
+            result[k] = v
+    return result
+
+
 def build_api_blueprint(
     service: CoordinatorService,
     monitoring: MonitoringService,
@@ -211,6 +227,41 @@ def build_api_blueprint(
             "pk_columns": metadata.pk_columns,
             "not_null_columns": not_null_columns,
         }), 200
+
+    # ── Compare tasks ──────────────────────────────────────────────────────
+
+    @bp.post("/compare-tasks")
+    def create_compare_task():
+        payload = request.get_json(silent=True) or {}
+        source_table = (payload.get("source_table") or "").strip()
+        target_table = (payload.get("target_table") or "").strip()
+        if not source_table:
+            raise ValidationError("source_table is required")
+        if not target_table:
+            raise ValidationError("target_table is required")
+        raw_pk = payload.get("pk_columns")
+        if raw_pk is not None and not isinstance(raw_pk, list):
+            raise ValidationError("pk_columns must be an array of strings")
+        pk_columns = [str(c).strip() for c in (raw_pk or []) if str(c).strip()] or None
+        task = repository.create_compare_task(source_table, target_table, pk_columns)
+        return jsonify(_serialize_task(task)), 201
+
+    @bp.get("/compare-tasks")
+    def list_compare_tasks():
+        limit = request.args.get("limit", default=100, type=int)
+        limit = min(max(limit, 1), 1000)
+        tasks = repository.list_compare_tasks(limit=limit)
+        return jsonify({"items": [_serialize_task(t) for t in tasks], "count": len(tasks)}), 200
+
+    @bp.get("/compare-tasks/<task_id>")
+    def get_compare_task(task_id: str):
+        task = repository.get_compare_task(task_id)
+        return jsonify(_serialize_task(task)), 200
+
+    @bp.delete("/compare-tasks/<task_id>")
+    def delete_compare_task(task_id: str):
+        repository.delete_compare_task(task_id)
+        return jsonify({"deleted": True}), 200
 
     @bp.post("/monitor/run-once")
     def run_monitor_once():

@@ -767,3 +767,181 @@ class MigrationWorker:
             logger.exception("Bulk chunk failed", extra={"chunk_id": chunk_id})
             self._repository.fail_chunk(chunk_id, str(exc))
         return True
+
+
+# ---------------------------------------------------------------------------
+# CompareWorker — compares table contents between source and target Oracle
+# ---------------------------------------------------------------------------
+
+
+class CompareWorker:
+    """Compares table data between source and target Oracle databases.
+
+    For each claimed compare task, the worker:
+      1. Counts rows in source and target.
+      2. If PK columns are specified, identifies rows missing on each side.
+      3. Stores a result summary and sample diffs back to the state DB.
+
+    Start with WORKER_TYPE=compare.
+    """
+
+    _MAX_SAMPLE = 20
+
+    def __init__(
+        self,
+        worker_id: str,
+        config: AppConfig,
+        repository: CoordinatorRepository,
+    ) -> None:
+        self._worker_id = worker_id
+        self._config = config
+        self._repository = repository
+        self._shutdown_event = threading.Event()
+
+    def shutdown(self) -> None:
+        logger.info("CompareWorker shutdown requested", extra={"worker_id": self._worker_id})
+        self._shutdown_event.set()
+
+    def run(self) -> None:
+        signal.signal(signal.SIGTERM, lambda *_: self.shutdown())
+        signal.signal(signal.SIGINT, lambda *_: self.shutdown())
+        logger.info("CompareWorker started", extra={"worker_id": self._worker_id})
+
+        while not self._shutdown_event.is_set():
+            try:
+                if self._try_compare_work():
+                    continue
+                self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
+            except Exception:
+                logger.exception("CompareWorker error", extra={"worker_id": self._worker_id})
+                self._shutdown_event.wait(self._config.worker_poll_interval_seconds)
+
+        logger.info("CompareWorker stopped", extra={"worker_id": self._worker_id})
+
+    def _try_compare_work(self) -> bool:
+        task = self._repository.claim_compare_task(self._worker_id)
+        if not task:
+            return False
+
+        task_id = str(task["task_id"])
+        source_table = str(task["source_table"])
+        target_table = str(task["target_table"])
+        pk_columns: list[str] = list(task.get("pk_columns") or [])
+
+        logger.info(
+            "Compare task claimed",
+            extra={"task_id": task_id, "source_table": source_table, "worker_id": self._worker_id},
+        )
+        try:
+            result_summary, sample_diffs = self._compare_tables(source_table, target_table, pk_columns)
+            self._repository.complete_compare_task(task_id, result_summary, sample_diffs)
+            logger.info("Compare task completed", extra={"task_id": task_id, "summary": result_summary})
+        except Exception as exc:
+            logger.exception("Compare task failed", extra={"task_id": task_id})
+            self._repository.fail_compare_task(task_id, str(exc))
+        return True
+
+    def _compare_tables(
+        self,
+        source_table: str,
+        target_table: str,
+        pk_columns: list[str],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        src_dsn, src_user, src_pwd = _source_cfg(self._config)
+        tgt_dsn, tgt_user, tgt_pwd = _target_cfg(self._config)
+
+        src_qual = _qualified_table(source_table)
+        tgt_qual = _qualified_table(target_table)
+
+        with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn, \
+             _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
+
+            src_count = self._count_rows(src_conn, src_qual)
+            tgt_count = self._count_rows(tgt_conn, tgt_qual)
+
+            result_summary: dict[str, Any] = {
+                "source_count": src_count,
+                "target_count": tgt_count,
+                "count_match": src_count == tgt_count,
+                "count_diff": src_count - tgt_count,
+            }
+            sample_diffs: list[dict[str, Any]] = []
+
+            if not pk_columns:
+                result_summary["pk_comparison"] = "skipped — no PK columns specified"
+                return result_summary, sample_diffs
+
+            missing_in_target = self._find_missing_pks(
+                src_conn, tgt_conn, src_qual, tgt_qual, pk_columns
+            )
+            missing_in_source = self._find_missing_pks(
+                tgt_conn, src_conn, tgt_qual, src_qual, pk_columns
+            )
+
+            result_summary["missing_in_target_count"] = len(missing_in_target)
+            result_summary["missing_in_source_count"] = len(missing_in_source)
+            result_summary["pk_comparison"] = "done"
+
+            for pk_val in missing_in_target[: self._MAX_SAMPLE]:
+                sample_diffs.append({"type": "missing_in_target", "pk": pk_val})
+            for pk_val in missing_in_source[: self._MAX_SAMPLE]:
+                sample_diffs.append({"type": "missing_in_source", "pk": pk_val})
+
+        return result_summary, sample_diffs
+
+    @staticmethod
+    def _count_rows(conn: Any, qualified_table: str) -> int:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {qualified_table}")  # noqa: S608
+            row = cur.fetchone()
+        return int(row[0])
+
+    def _find_missing_pks(
+        self,
+        source_conn: Any,
+        check_conn: Any,
+        source_qual: str,
+        check_qual: str,
+        pk_columns: list[str],
+    ) -> list[Any]:
+        """Return PK values present in source_conn but absent in check_conn (up to 2×MAX_SAMPLE)."""
+        pk_cols_sql = ", ".join(f'"{c}"' for c in pk_columns)
+
+        with source_conn.cursor() as cur:
+            cur.execute(f"SELECT {pk_cols_sql} FROM {source_qual}")  # noqa: S608
+            source_pks = cur.fetchmany(10000)
+
+        if not source_pks:
+            return []
+
+        missing: list[Any] = []
+        batch_size = 500
+        for i in range(0, len(source_pks), batch_size):
+            batch = source_pks[i : i + batch_size]
+            if len(pk_columns) == 1:
+                placeholders = ", ".join(f":{j + 1}" for j in range(len(batch)))
+                sql = f'SELECT {pk_cols_sql} FROM {check_qual} WHERE "{pk_columns[0]}" IN ({placeholders})'  # noqa: S608
+                params: list[Any] = [r[0] for r in batch]
+            else:
+                conditions = " OR ".join(
+                    "(" + " AND ".join(
+                        f'"{c}" = :{j * len(pk_columns) + k + 1}'
+                        for k, c in enumerate(pk_columns)
+                    ) + ")"
+                    for j in range(len(batch))
+                )
+                sql = f"SELECT {pk_cols_sql} FROM {check_qual} WHERE {conditions}"  # noqa: S608
+                params = [val for row in batch for val in row]
+
+            with check_conn.cursor() as cur:
+                cur.execute(sql, params)
+                found = {tuple(r) for r in cur.fetchall()}
+
+            for row in batch:
+                pk_key = tuple(row)
+                if pk_key not in found:
+                    missing.append(list(row) if len(pk_columns) > 1 else row[0])
+                    if len(missing) >= self._MAX_SAMPLE * 2:
+                        return missing
+
+        return missing

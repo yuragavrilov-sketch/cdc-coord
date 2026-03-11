@@ -262,6 +262,50 @@
       .pagination button:disabled { opacity: .4; cursor: not-allowed; }
       .pagination button.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
       .pagination-info { font-size: 12px; color: #6b7280; margin-left: 4px; }
+
+      /* Tab navigation */
+      .tab-nav { display: flex; gap: 0; border-bottom: 2px solid #e5e7eb; margin-bottom: 20px; }
+      .tab-btn {
+        padding: 10px 22px; border: none; background: none; cursor: pointer;
+        font-size: 14px; font-weight: 600; color: #6b7280;
+        border-bottom: 2px solid transparent; margin-bottom: -2px;
+        transition: color .15s, border-color .15s;
+      }
+      .tab-btn:hover { color: #1d4ed8; }
+      .tab-btn.active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
+      .tab-pane { display: none; }
+      .tab-pane.active { display: block; }
+
+      /* Compare tab */
+      .compare-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+      .compare-toolbar h2 { margin: 0; flex-shrink: 0; }
+      .btn-new-compare {
+        padding: 7px 16px; background: #1d4ed8; color: #fff;
+        border: none; border-radius: 6px; font-size: 14px;
+        font-weight: 600; cursor: pointer; white-space: nowrap; margin-left: auto;
+      }
+      .btn-new-compare:hover { background: #1e40af; }
+      .compare-table { width: 100%; border-collapse: collapse; }
+      .compare-table th, .compare-table td { text-align: left; padding: 10px; border-bottom: 1px solid #e5e7eb; }
+      .compare-table th { font-size: 12px; color: #6b7280; text-transform: uppercase; }
+      .compare-result-summary { font-size: 12px; }
+      .compare-result-summary .ok  { color: #166534; font-weight: 600; }
+      .compare-result-summary .bad { color: #991b1b; font-weight: 600; }
+      .compare-diffs-btn {
+        padding: 3px 10px; border: 1px solid #d1d5db; border-radius: 5px;
+        background: #fff; cursor: pointer; font-size: 12px; color: #374151;
+      }
+      .compare-diffs-btn:hover { background: #f3f4f6; }
+      .compare-diffs-block {
+        margin-top: 6px; padding: 8px 10px; background: #f8fafc;
+        border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px;
+        font-family: monospace; white-space: pre-wrap; max-height: 300px; overflow-y: auto;
+      }
+      .btn-delete-compare {
+        background: none; border: none; cursor: pointer;
+        font-size: 16px; padding: 2px 6px; border-radius: 4px; opacity: 0.55;
+      }
+      .btn-delete-compare:hover { opacity: 1; background: #fee2e2; }
     </style>
   </head>
   <body>
@@ -277,7 +321,14 @@
       {% endfor %}
     </section>
 
-    <section>
+    <!-- Tab navigation -->
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="migration">Миграция</button>
+      <button class="tab-btn" data-tab="compare">Сравнение таблиц</button>
+    </nav>
+
+    <!-- Tab: Migration -->
+    <section id="tab-migration" class="tab-pane active">
       <div class="tbl-toolbar">
         <h2>Таблицы / Jobs</h2>
         <input type="text" id="tbl-search" placeholder="Поиск по таблице…" autocomplete="off">
@@ -305,6 +356,32 @@
       <div class="pagination" id="tbl-pagination"></div>
     </section>
 
+    <!-- Tab: Compare -->
+    <section id="tab-compare" class="tab-pane">
+      <div class="compare-toolbar">
+        <h2>Сравнение таблиц</h2>
+        <button class="btn-new-compare" id="btn-new-compare">+ Новое сравнение</button>
+      </div>
+      <div id="cmp-error" class="error" style="display:none"></div>
+
+      <table class="compare-table" id="cmp-table">
+        <thead>
+          <tr>
+            <th>Source Table</th>
+            <th>Target Table</th>
+            <th>PK Columns</th>
+            <th>Статус</th>
+            <th>Результат</th>
+            <th>Создана</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="cmp-body">
+          <tr><td colspan="7" class="loading">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </section>
+
     <!-- Shared overlay -->
     <div id="overlay" class="overlay"></div>
 
@@ -316,6 +393,17 @@
           <button class="btn-close" id="modal-close" title="Закрыть">&#x2715;</button>
         </div>
         <div class="modal-body" id="modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Modal: new compare task -->
+    <div id="compare-modal" class="modal" role="dialog" aria-modal="true">
+      <div class="modal-box">
+        <div class="modal-header">
+          <h2>Новое сравнение таблиц</h2>
+          <button class="btn-close" id="compare-modal-close" title="Закрыть">&#x2715;</button>
+        </div>
+        <div class="modal-body" id="compare-modal-body"></div>
       </div>
     </div>
 
@@ -1286,6 +1374,249 @@
 
         /* Initial load */
         loadTable();
+
+        /* ─── Tab switching ─── */
+        document.querySelectorAll(".tab-btn").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.remove("active"); });
+            document.querySelectorAll(".tab-pane").forEach(function (p) { p.classList.remove("active"); });
+            btn.classList.add("active");
+            const pane = document.getElementById("tab-" + btn.dataset.tab);
+            if (pane) {
+              pane.classList.add("active");
+              if (btn.dataset.tab === "compare") loadCompareTasks();
+            }
+          });
+        });
+
+        /* ─── Compare modal ─── */
+        const compareModal     = document.getElementById("compare-modal");
+        const compareModalBody = document.getElementById("compare-modal-body");
+        const compareModalClose = document.getElementById("compare-modal-close");
+
+        function openCompareModal() {
+          compareModalBody.innerHTML = renderCompareForm();
+          overlay.classList.add("visible");
+          compareModal.classList.add("visible");
+          bindCompareForm();
+          // load source/target table lists into selects
+          Promise.all([
+            fetchJson("/api/v1/source-tables"),
+            fetchJson("/api/v1/target-tables"),
+          ]).then(function ([srcData, tgtData]) {
+            const srcSel = document.getElementById("cf-source");
+            const tgtSel = document.getElementById("cf-target");
+            if (srcSel) populateSelect(srcSel, srcData.tables || [], "");
+            if (tgtSel) populateSelect(tgtSel, tgtData.tables || [], "");
+          }).catch(function (err) {
+            const srcSel = document.getElementById("cf-source");
+            if (srcSel) srcSel.innerHTML = `<option value="">Ошибка: ${escHtml(String(err.message || err))}</option>`;
+          });
+        }
+
+        function closeCompareModal() {
+          overlay.classList.remove("visible");
+          compareModal.classList.remove("visible");
+        }
+
+        compareModalClose.addEventListener("click", closeCompareModal);
+        overlay.addEventListener("click", function () {
+          closePanel();
+          closeModal();
+          closeCompareModal();
+        });
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") closeCompareModal();
+        });
+
+        document.getElementById("btn-new-compare").addEventListener("click", openCompareModal);
+
+        function renderCompareForm() {
+          return `
+            <form id="compare-form" autocomplete="off">
+              <div class="form-group">
+                <label>Source Table</label>
+                <select id="cf-source"><option value="">— Загрузка… —</option></select>
+              </div>
+              <div class="form-group">
+                <label>Target Table</label>
+                <select id="cf-target"><option value="">— Загрузка… —</option></select>
+              </div>
+              <div class="form-group">
+                <label>PK Columns <span class="hint">— через запятую (необязательно)</span></label>
+                <input type="text" id="cf-pk" placeholder="например: ID или ID,ORG_ID">
+              </div>
+              <div id="cmp-form-msg" class="form-error" style="display:none"></div>
+              <button type="submit" class="btn-primary" id="cf-submit">Запустить сравнение</button>
+            </form>
+          `;
+        }
+
+        function bindCompareForm() {
+          const form = document.getElementById("compare-form");
+          if (!form) return;
+          form.addEventListener("submit", async function (e) {
+            e.preventDefault();
+            const msgEl = document.getElementById("cmp-form-msg");
+            const btn   = document.getElementById("cf-submit");
+            const src   = document.getElementById("cf-source").value.trim();
+            const tgt   = document.getElementById("cf-target").value.trim();
+            const pkRaw = document.getElementById("cf-pk").value.trim();
+
+            if (!src) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Source Table"; msgEl.style.display = "block"; return; }
+            if (!tgt) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Target Table"; msgEl.style.display = "block"; return; }
+
+            const pkCols = pkRaw ? pkRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
+            msgEl.style.display = "none";
+            btn.disabled = true;
+            btn.textContent = "Создаём…";
+
+            try {
+              const resp = await fetch("/api/v1/compare-tasks", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ source_table: src, target_table: tgt, pk_columns: pkCols.length ? pkCols : null }),
+              });
+              const data = await resp.json();
+              if (!resp.ok) throw new Error(buildErrorMessage(data));
+              msgEl.className = "form-success";
+              msgEl.textContent = "Задача создана: " + (data.task_id || "OK");
+              msgEl.style.display = "block";
+              btn.textContent = "Готово";
+              setTimeout(function () { closeCompareModal(); loadCompareTasks(); }, 900);
+            } catch (err) {
+              msgEl.className = "form-error";
+              msgEl.textContent = String(err.message || err);
+              msgEl.style.display = "block";
+              btn.disabled = false;
+              btn.textContent = "Запустить сравнение";
+            }
+          });
+        }
+
+        /* ─── Compare tasks list ─── */
+        async function loadCompareTasks() {
+          const body  = document.getElementById("cmp-body");
+          const errEl = document.getElementById("cmp-error");
+          body.innerHTML = `<tr><td colspan="7" class="loading">Загрузка…</td></tr>`;
+          errEl.style.display = "none";
+
+          let data;
+          try {
+            data = await fetchJson("/api/v1/compare-tasks?limit=200");
+          } catch (err) {
+            body.innerHTML = `<tr><td colspan="7" class="muted">Не удалось загрузить задачи</td></tr>`;
+            errEl.textContent = "Ошибка: " + String(err.message || err);
+            errEl.style.display = "block";
+            return;
+          }
+
+          const tasks = data.items || [];
+          if (tasks.length === 0) {
+            body.innerHTML = `<tr><td colspan="7" class="muted">Нет задач сравнения</td></tr>`;
+            return;
+          }
+
+          body.innerHTML = tasks.map(function (t) {
+            const pkText = (t.pk_columns && t.pk_columns.length) ? escHtml(t.pk_columns.join(", ")) : '<span class="muted">—</span>';
+            const createdAt = t.created_at ? escHtml(fmtDate(t.created_at) || t.created_at) : "—";
+            const summaryHtml = renderCompareSummary(t);
+            const hasDiffs = t.sample_diffs && t.sample_diffs.length > 0;
+            const diffsCell = hasDiffs
+              ? `<button class="compare-diffs-btn" data-task-id="${escHtml(t.task_id)}">Показать дiff…</button>
+                 <div class="compare-diffs-block" id="diffs-${escHtml(t.task_id)}" style="display:none"></div>`
+              : '<span class="muted">—</span>';
+            return `<tr>
+              <td>${escHtml(t.source_table)}</td>
+              <td>${escHtml(t.target_table)}</td>
+              <td style="font-size:12px;">${pkText}</td>
+              <td>${statusBadgeHtml(t.status)}</td>
+              <td class="compare-result-summary">${summaryHtml}</td>
+              <td class="muted" style="font-size:11px;">${createdAt}</td>
+              <td style="white-space:nowrap;">
+                ${diffsCell}
+                <button class="btn-delete-compare" data-task-id="${escHtml(t.task_id)}" title="Удалить">&#x1F5D1;</button>
+              </td>
+            </tr>`;
+          }).join("");
+
+          // Store sample_diffs in dataset for quick access
+          tasks.forEach(function (t) {
+            if (t.sample_diffs && t.sample_diffs.length) {
+              const el = document.getElementById("diffs-" + t.task_id);
+              if (el) el.dataset.diffs = JSON.stringify(t.sample_diffs);
+            }
+          });
+        }
+
+        function renderCompareSummary(task) {
+          const s = task.result_summary;
+          if (task.status === "pending")   return '<span class="muted">ожидание</span>';
+          if (task.status === "running")   return '<span class="muted">выполняется…</span>';
+          if (task.status === "failed")    return `<span class="bad">Ошибка</span>` + (task.error_message ? `: ${escHtml(String(task.error_message).slice(0, 120))}` : "");
+          if (!s) return '<span class="muted">—</span>';
+
+          const countCls = s.count_match ? "ok" : "bad";
+          let html = `<span class="${countCls}">Строк src: ${(s.source_count || 0).toLocaleString("ru-RU")}, tgt: ${(s.target_count || 0).toLocaleString("ru-RU")}`;
+          if (!s.count_match) html += ` (разница: ${s.count_diff > 0 ? "+" : ""}${s.count_diff})`;
+          html += `</span>`;
+          if (s.pk_comparison === "done") {
+            const mis_tgt = s.missing_in_target_count || 0;
+            const mis_src = s.missing_in_source_count || 0;
+            if (mis_tgt || mis_src) {
+              html += `<br><span class="bad">Отсутствует в target: ${mis_tgt}, в source: ${mis_src}</span>`;
+            } else {
+              html += `<br><span class="ok">Все PK совпадают</span>`;
+            }
+          } else if (s.pk_comparison) {
+            html += `<br><span class="muted">${escHtml(String(s.pk_comparison))}</span>`;
+          }
+          return html;
+        }
+
+        // Delegated events on compare table body
+        document.getElementById("cmp-body").addEventListener("click", async function (e) {
+          // Toggle diffs
+          const diffsBtn = e.target.closest(".compare-diffs-btn");
+          if (diffsBtn) {
+            const taskId   = diffsBtn.dataset.taskId;
+            const diffsDiv = document.getElementById("diffs-" + taskId);
+            if (!diffsDiv) return;
+            if (diffsDiv.style.display !== "none") {
+              diffsDiv.style.display = "none";
+              diffsBtn.textContent = "Показать diff…";
+            } else {
+              diffsDiv.style.display = "block";
+              diffsBtn.textContent = "Скрыть";
+              if (!diffsDiv.dataset.rendered) {
+                diffsDiv.dataset.rendered = "1";
+                try {
+                  const diffs = JSON.parse(diffsDiv.dataset.diffs || "[]");
+                  diffsDiv.textContent = diffs.map(function (d) {
+                    return d.type + ": " + JSON.stringify(d.pk);
+                  }).join("\n");
+                } catch { diffsDiv.textContent = "(ошибка парсинга)"; }
+              }
+            }
+            return;
+          }
+
+          // Delete compare task
+          const delBtn = e.target.closest(".btn-delete-compare");
+          if (delBtn) {
+            const taskId = delBtn.dataset.taskId;
+            if (!confirm("Удалить задачу сравнения?")) return;
+            delBtn.disabled = true;
+            try {
+              await fetchJson("/api/v1/compare-tasks/" + encodeURIComponent(taskId), { method: "DELETE" });
+              loadCompareTasks();
+            } catch (err) {
+              alert("Ошибка удаления: " + String(err.message || err));
+              delBtn.disabled = false;
+            }
+          }
+        });
+
       })();
     </script>
   </body>

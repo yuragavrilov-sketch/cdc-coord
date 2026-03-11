@@ -145,6 +145,27 @@ class CoordinatorRepository:
                         )
                         """
                     )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS migration_system.migration_compare_tasks (
+                            task_id UUID PRIMARY KEY,
+                            source_table VARCHAR(200) NOT NULL,
+                            target_table VARCHAR(200) NOT NULL,
+                            pk_columns JSONB,
+                            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                            assigned_worker_id VARCHAR(100),
+                            assigned_at TIMESTAMP,
+                            completed_at TIMESTAMP,
+                            result_summary JSONB,
+                            sample_diffs JSONB,
+                            error_message TEXT,
+                            created_at TIMESTAMP DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_compare_tasks_status ON migration_system.migration_compare_tasks (status)"
+                    )
         except psycopg.errors.UniqueViolation:
             pass  # Another worker already created the schema concurrently
 
@@ -1080,4 +1101,112 @@ class CoordinatorRepository:
     @staticmethod
     def _normalize_table_key(table_name: str | None) -> str | None:
         return normalize_table_key(table_name)
+
+    # -------------------------------------------------------------------------
+    # Compare tasks
+    # -------------------------------------------------------------------------
+
+    def create_compare_task(
+        self,
+        source_table: str,
+        target_table: str,
+        pk_columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        task_id = str(uuid.uuid4())
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO migration_system.migration_compare_tasks
+                        (task_id, source_table, target_table, pk_columns, status, created_at)
+                    VALUES (%s, %s, %s, %s, 'pending', NOW())
+                    RETURNING *
+                    """,
+                    (task_id, source_table, target_table, Json(pk_columns) if pk_columns is not None else None),
+                )
+                row = cur.fetchone()
+        return dict(row)
+
+    def list_compare_tasks(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM migration_system.migration_compare_tasks ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
+                rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+    def get_compare_task(self, task_id: str) -> dict[str, Any]:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM migration_system.migration_compare_tasks WHERE task_id = %s",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise NotFoundError(f"Compare task not found: {task_id}")
+        return dict(row)
+
+    def delete_compare_task(self, task_id: str) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM migration_system.migration_compare_tasks WHERE task_id = %s RETURNING task_id",
+                    (task_id,),
+                )
+                if not cur.fetchone():
+                    raise NotFoundError(f"Compare task not found: {task_id}")
+
+    def claim_compare_task(self, worker_id: str) -> dict[str, Any] | None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_compare_tasks
+                    SET status = 'running', assigned_worker_id = %s, assigned_at = NOW()
+                    WHERE task_id = (
+                        SELECT task_id FROM migration_system.migration_compare_tasks
+                        WHERE status = 'pending'
+                        ORDER BY created_at
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING *
+                    """,
+                    (worker_id,),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def complete_compare_task(
+        self,
+        task_id: str,
+        result_summary: dict[str, Any],
+        sample_diffs: list[dict[str, Any]] | None = None,
+    ) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_compare_tasks
+                    SET status = 'completed', completed_at = NOW(),
+                        result_summary = %s, sample_diffs = %s
+                    WHERE task_id = %s
+                    """,
+                    (Json(result_summary), Json(sample_diffs or []), task_id),
+                )
+
+    def fail_compare_task(self, task_id: str, error_message: str) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE migration_system.migration_compare_tasks
+                    SET status = 'failed', completed_at = NOW(), error_message = %s
+                    WHERE task_id = %s
+                    """,
+                    (error_message[:4000], task_id),
+                )
 
