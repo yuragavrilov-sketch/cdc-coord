@@ -1471,6 +1471,72 @@
           });
         });
 
+        /* ─── Shared: table-pair multi-select ─── */
+        function populateTablePairList(srcTables, tgtTables, listEl, searchEl, selectAllEl) {
+          // Build case-insensitive target lookup: full-name and table-part fallback
+          const tgtMap = {};
+          tgtTables.forEach(function (t) {
+            tgtMap[t.toUpperCase()] = t;
+            const part = t.split(".").pop().toUpperCase();
+            if (!tgtMap[part]) tgtMap[part] = t;
+          });
+
+          function findTarget(src) {
+            return tgtMap[src.toUpperCase()] || tgtMap[src.split(".").pop().toUpperCase()] || null;
+          }
+
+          const pairs = srcTables.map(function (src) {
+            return { src: src, tgt: findTarget(src) };
+          });
+
+          function render(filter) {
+            const f = filter.toUpperCase();
+            const filtered = f ? pairs.filter(function (p) { return p.src.toUpperCase().includes(f); }) : pairs;
+            if (filtered.length === 0) {
+              listEl.innerHTML = `<span class="cols-loading">Нет таблиц${f ? " по запросу" : ""}</span>`;
+            } else {
+              listEl.innerHTML = filtered.map(function (p) {
+                const disabled = !p.tgt;
+                const tgtHtml = p.tgt
+                  ? `<span class="muted" style="font-size:11px;"> → ${escHtml(p.tgt)}</span>`
+                  : `<span style="font-size:11px;color:#b91c1c;"> (нет в приёмнике)</span>`;
+                return `<label class="multiselect-item${disabled ? " multiselect-item-disabled" : ""}">
+                  <input type="checkbox" name="tbl-pair" value="${escHtml(p.src)}"
+                    data-tgt="${escHtml(p.tgt || "")}"${disabled ? " disabled" : ""}>
+                  ${escHtml(p.src)}${tgtHtml}
+                </label>`;
+              }).join("");
+            }
+            syncSelectAll();
+          }
+
+          function syncSelectAll() {
+            if (!selectAllEl) return;
+            const all     = listEl.querySelectorAll("input[name=tbl-pair]:not(:disabled)");
+            const checked = listEl.querySelectorAll("input[name=tbl-pair]:checked");
+            selectAllEl.checked       = all.length > 0 && checked.length === all.length;
+            selectAllEl.indeterminate = checked.length > 0 && checked.length < all.length;
+          }
+
+          render("");
+
+          if (searchEl) {
+            let timer;
+            searchEl.addEventListener("input", function () {
+              clearTimeout(timer);
+              timer = setTimeout(function () { render(searchEl.value.trim()); }, 200);
+            });
+          }
+          if (selectAllEl) {
+            selectAllEl.addEventListener("change", function () {
+              listEl.querySelectorAll("input[name=tbl-pair]:not(:disabled)").forEach(function (cb) {
+                cb.checked = selectAllEl.checked;
+              });
+            });
+            listEl.addEventListener("change", syncSelectAll);
+          }
+        }
+
         /* ─── Compare modal ─── */
         const compareModal     = document.getElementById("compare-modal");
         const compareModalBody = document.getElementById("compare-modal-body");
@@ -1481,18 +1547,17 @@
           overlay.classList.add("visible");
           compareModal.classList.add("visible");
           bindCompareForm();
-          // load source/target table lists into selects
           Promise.all([
             fetchJson("/api/v1/source-tables"),
             fetchJson("/api/v1/target-tables"),
           ]).then(function ([srcData, tgtData]) {
-            const srcSel = document.getElementById("cf-source");
-            const tgtSel = document.getElementById("cf-target");
-            if (srcSel) populateSelect(srcSel, srcData.tables || [], "");
-            if (tgtSel) populateSelect(tgtSel, tgtData.tables || [], "");
+            const listEl      = document.getElementById("cf-table-list");
+            const searchEl    = document.getElementById("cf-search");
+            const selectAllEl = document.getElementById("cf-select-all");
+            if (listEl) populateTablePairList(srcData.tables || [], tgtData.tables || [], listEl, searchEl, selectAllEl);
           }).catch(function (err) {
-            const srcSel = document.getElementById("cf-source");
-            if (srcSel) srcSel.innerHTML = `<option value="">Ошибка: ${escHtml(String(err.message || err))}</option>`;
+            const listEl = document.getElementById("cf-table-list");
+            if (listEl) listEl.innerHTML = `<span style="color:#b91c1c;padding:8px;display:block;">Ошибка загрузки: ${escHtml(String(err.message || err))}</span>`;
           });
         }
 
@@ -1517,12 +1582,17 @@
           return `
             <form id="compare-form" autocomplete="off">
               <div class="form-group">
-                <label>Source Table</label>
-                <select id="cf-source"><option value="">— Загрузка… —</option></select>
-              </div>
-              <div class="form-group">
-                <label>Target Table</label>
-                <select id="cf-target"><option value="">— Загрузка… —</option></select>
+                <label>Таблицы <span class="hint">— target подбирается автоматически по имени</span></label>
+                <input type="text" id="cf-search" placeholder="Фильтр по имени таблицы…"
+                  style="margin-bottom:6px;width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:13px;">
+                <div style="margin-bottom:4px;font-size:12px;">
+                  <label style="cursor:pointer;font-weight:400;display:flex;align-items:center;gap:6px;">
+                    <input type="checkbox" id="cf-select-all"> Выбрать все доступные
+                  </label>
+                </div>
+                <div class="multiselect-box" id="cf-table-list" style="max-height:220px;">
+                  <span class="cols-loading">Загрузка таблиц…</span>
+                </div>
               </div>
               <div class="form-group">
                 <label>PK Columns <span class="hint">— через запятую (обязательно для режимов фильтра)</span></label>
@@ -1550,58 +1620,71 @@
           const form = document.getElementById("compare-form");
           if (!form) return;
 
-          // Toggle filter value field visibility
           form.querySelectorAll("input[name=cf-mode]").forEach(function (r) {
             r.addEventListener("change", function () {
-              const filterGroup = document.getElementById("cf-filter-group");
-              if (filterGroup) filterGroup.style.display = r.value !== "full" ? "block" : "none";
+              const fg = document.getElementById("cf-filter-group");
+              if (fg) fg.style.display = r.value !== "full" ? "block" : "none";
             });
           });
 
           form.addEventListener("submit", async function (e) {
             e.preventDefault();
-            const msgEl      = document.getElementById("cmp-form-msg");
-            const btn        = document.getElementById("cf-submit");
-            const src        = document.getElementById("cf-source").value.trim();
-            const tgt        = document.getElementById("cf-target").value.trim();
-            const pkRaw      = document.getElementById("cf-pk").value.trim();
-            const mode       = form.querySelector("input[name=cf-mode]:checked").value;
-            const filterVal  = (document.getElementById("cf-filter-value") || {}).value || "";
+            const msgEl    = document.getElementById("cmp-form-msg");
+            const btn      = document.getElementById("cf-submit");
+            const pkRaw    = (document.getElementById("cf-pk") || {}).value || "";
+            const mode     = form.querySelector("input[name=cf-mode]:checked").value;
+            const filterVal = (document.getElementById("cf-filter-value") || {}).value || "";
 
-            if (!src) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Source Table"; msgEl.style.display = "block"; return; }
-            if (!tgt) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Target Table"; msgEl.style.display = "block"; return; }
-            if (mode !== "full" && !pkRaw.trim()) { msgEl.className = "form-error"; msgEl.textContent = "Укажите PK Columns для фильтрации"; msgEl.style.display = "block"; return; }
-            if (mode !== "full" && !filterVal.trim()) { msgEl.className = "form-error"; msgEl.textContent = "Укажите значение PK"; msgEl.style.display = "block"; return; }
+            const checked = Array.from(form.querySelectorAll("input[name=tbl-pair]:checked"));
+            if (checked.length === 0) {
+              msgEl.className = "form-error"; msgEl.textContent = "Выберите хотя бы одну таблицу"; msgEl.style.display = "block"; return;
+            }
+            if (mode !== "full" && !pkRaw.trim()) {
+              msgEl.className = "form-error"; msgEl.textContent = "Укажите PK Columns для фильтрации"; msgEl.style.display = "block"; return;
+            }
+            if (mode !== "full" && !filterVal.trim()) {
+              msgEl.className = "form-error"; msgEl.textContent = "Укажите значение PK"; msgEl.style.display = "block"; return;
+            }
 
             const pkCols = pkRaw ? pkRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
             msgEl.style.display = "none";
             btn.disabled = true;
-            btn.textContent = "Создаём…";
 
-            try {
-              const body = {
-                source_table: src,
-                target_table: tgt,
-                pk_columns: pkCols.length ? pkCols : null,
-                compare_mode: mode,
-                pk_filter_value: mode !== "full" ? filterVal.trim() : null,
-              };
-              const resp = await fetch("/api/v1/compare-tasks", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-              });
-              const data = await resp.json();
-              if (!resp.ok) throw new Error(buildErrorMessage(data));
+            const pairs = checked.map(function (cb) { return { src: cb.value, tgt: cb.dataset.tgt || cb.value }; });
+            const total = pairs.length;
+            let done = 0, errors = [];
+
+            for (let i = 0; i < pairs.length; i++) {
+              const src = pairs[i].src, tgt = pairs[i].tgt;
               msgEl.className = "form-success";
-              msgEl.textContent = "Задача создана: " + (data.task_id || "OK");
+              msgEl.textContent = `Создаём ${i + 1} из ${total}…`;
               msgEl.style.display = "block";
-              btn.textContent = "Готово";
+              try {
+                const resp = await fetch("/api/v1/compare-tasks", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    source_table: src, target_table: tgt,
+                    pk_columns: pkCols.length ? pkCols : null,
+                    compare_mode: mode,
+                    pk_filter_value: mode !== "full" ? filterVal.trim() : null,
+                  }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(buildErrorMessage(data));
+                done++;
+              } catch (err) {
+                errors.push(src + ": " + String(err.message || err));
+              }
+            }
+
+            if (errors.length === 0) {
+              msgEl.className = "form-success";
+              msgEl.textContent = total === 1 ? "Задача создана" : `Готово: создано ${done} задач`;
               setTimeout(function () { closeCompareModal(); loadCompareTasks(); }, 900);
-            } catch (err) {
+            } else {
               msgEl.className = "form-error";
-              msgEl.textContent = String(err.message || err);
-              msgEl.style.display = "block";
+              msgEl.textContent = `Создано ${done} из ${total}. Ошибки:\n` + errors.join("\n");
               btn.disabled = false;
               btn.textContent = "Запустить сравнение";
             }
@@ -1820,13 +1903,13 @@
             fetchJson("/api/v1/source-tables"),
             fetchJson("/api/v1/target-tables"),
           ]).then(function ([srcData, tgtData]) {
-            const srcSel = document.getElementById("sf-source");
-            const tgtSel = document.getElementById("sf-target");
-            if (srcSel) populateSelect(srcSel, srcData.tables || [], "");
-            if (tgtSel) populateSelect(tgtSel, tgtData.tables || [], "");
+            const listEl      = document.getElementById("sf-table-list");
+            const searchEl    = document.getElementById("sf-search");
+            const selectAllEl = document.getElementById("sf-select-all");
+            if (listEl) populateTablePairList(srcData.tables || [], tgtData.tables || [], listEl, searchEl, selectAllEl);
           }).catch(function (err) {
-            const srcSel = document.getElementById("sf-source");
-            if (srcSel) srcSel.innerHTML = `<option value="">Ошибка: ${escHtml(String(err.message || err))}</option>`;
+            const listEl = document.getElementById("sf-table-list");
+            if (listEl) listEl.innerHTML = `<span style="color:#b91c1c;padding:8px;display:block;">Ошибка загрузки: ${escHtml(String(err.message || err))}</span>`;
           });
         }
 
@@ -1849,12 +1932,17 @@
           return `
             <form id="schema-form" autocomplete="off">
               <div class="form-group">
-                <label>Source Table</label>
-                <select id="sf-source"><option value="">— Загрузка… —</option></select>
-              </div>
-              <div class="form-group">
-                <label>Target Table</label>
-                <select id="sf-target"><option value="">— Загрузка… —</option></select>
+                <label>Таблицы <span class="hint">— target подбирается автоматически по имени</span></label>
+                <input type="text" id="sf-search" placeholder="Фильтр по имени таблицы…"
+                  style="margin-bottom:6px;width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:13px;">
+                <div style="margin-bottom:4px;font-size:12px;">
+                  <label style="cursor:pointer;font-weight:400;display:flex;align-items:center;gap:6px;">
+                    <input type="checkbox" id="sf-select-all"> Выбрать все доступные
+                  </label>
+                </div>
+                <div class="multiselect-box" id="sf-table-list" style="max-height:280px;">
+                  <span class="cols-loading">Загрузка таблиц…</span>
+                </div>
               </div>
               <div id="sf-form-msg" class="form-error" style="display:none"></div>
               <button type="submit" class="btn-primary" id="sf-submit">Запустить сравнение структуры</button>
@@ -1869,30 +1957,45 @@
             e.preventDefault();
             const msgEl = document.getElementById("sf-form-msg");
             const btn   = document.getElementById("sf-submit");
-            const src   = document.getElementById("sf-source").value.trim();
-            const tgt   = document.getElementById("sf-target").value.trim();
-            if (!src) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Source Table"; msgEl.style.display = "block"; return; }
-            if (!tgt) { msgEl.className = "form-error"; msgEl.textContent = "Выберите Target Table"; msgEl.style.display = "block"; return; }
+
+            const checked = Array.from(form.querySelectorAll("input[name=tbl-pair]:checked"));
+            if (checked.length === 0) {
+              msgEl.className = "form-error"; msgEl.textContent = "Выберите хотя бы одну таблицу"; msgEl.style.display = "block"; return;
+            }
+
             msgEl.style.display = "none";
             btn.disabled = true;
-            btn.textContent = "Создаём…";
-            try {
-              const resp = await fetch("/api/v1/schema-tasks", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ source_table: src, target_table: tgt }),
-              });
-              const data = await resp.json();
-              if (!resp.ok) throw new Error(buildErrorMessage(data));
+
+            const pairs = checked.map(function (cb) { return { src: cb.value, tgt: cb.dataset.tgt || cb.value }; });
+            const total = pairs.length;
+            let done = 0, errors = [];
+
+            for (let i = 0; i < pairs.length; i++) {
+              const src = pairs[i].src, tgt = pairs[i].tgt;
               msgEl.className = "form-success";
-              msgEl.textContent = "Задача создана: " + (data.task_id || "OK");
+              msgEl.textContent = `Создаём ${i + 1} из ${total}…`;
               msgEl.style.display = "block";
-              btn.textContent = "Готово";
+              try {
+                const resp = await fetch("/api/v1/schema-tasks", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ source_table: src, target_table: tgt }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(buildErrorMessage(data));
+                done++;
+              } catch (err) {
+                errors.push(src + ": " + String(err.message || err));
+              }
+            }
+
+            if (errors.length === 0) {
+              msgEl.className = "form-success";
+              msgEl.textContent = total === 1 ? "Задача создана" : `Готово: создано ${done} задач`;
               setTimeout(function () { closeSchemaModal(); loadSchemaTasks(); }, 900);
-            } catch (err) {
+            } else {
               msgEl.className = "form-error";
-              msgEl.textContent = String(err.message || err);
-              msgEl.style.display = "block";
+              msgEl.textContent = `Создано ${done} из ${total}. Ошибки:\n` + errors.join("\n");
               btn.disabled = false;
               btn.textContent = "Запустить сравнение структуры";
             }
