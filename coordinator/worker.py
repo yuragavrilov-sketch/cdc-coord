@@ -68,11 +68,34 @@ def _build_source_select(
     scn_cutoff: int | None,
     start_rowid: str | None,
     end_rowid: str | None,
+    chunk_meta: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     qualified = _qualified_table(table_name)
     cols_str = ", ".join(f'"{c}"' for c in columns)
     params: dict[str, Any] = {}
 
+    # cdc_pk_split chunks: filter by PK range; use_scn flag overrides job-level scn_cutoff
+    if chunk_meta and "pk_col" in chunk_meta:
+        pk_col = chunk_meta["pk_col"]
+        pk_from = chunk_meta.get("pk_from")
+        pk_to = chunk_meta.get("pk_to")
+        effective_scn = scn_cutoff if chunk_meta.get("use_scn", True) else None
+
+        from_clause = f"{qualified} AS OF SCN :scn" if effective_scn else qualified
+        if effective_scn:
+            params["scn"] = effective_scn
+
+        where_parts: list[str] = []
+        if pk_from is not None:
+            where_parts.append(f'"{pk_col}" >= :pk_from')
+            params["pk_from"] = pk_from
+        if pk_to is not None:
+            where_parts.append(f'"{pk_col}" <= :pk_to')
+            params["pk_to"] = pk_to
+        where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        return f"SELECT {cols_str} FROM {from_clause}{where}", params
+
+    # Standard ROWID-based chunk
     from_clause = f"{qualified} AS OF SCN :scn" if scn_cutoff else qualified
     if scn_cutoff:
         params["scn"] = scn_cutoff
@@ -200,9 +223,10 @@ class BulkChunkProcessor:
         scn_cutoff = job.scn_cutoff
         start_rowid: str | None = chunk.get("start_rowid")
         end_rowid: str | None = chunk.get("end_rowid")
+        chunk_meta: dict[str, Any] | None = chunk.get("chunk_meta")
 
         select_sql, select_params = _build_source_select(
-            source_table, insertable_cols, scn_cutoff, start_rowid, end_rowid
+            source_table, insertable_cols, scn_cutoff, start_rowid, end_rowid, chunk_meta
         )
         insert_sql = _build_bulk_insert_sql(target_table, insertable_cols)
 

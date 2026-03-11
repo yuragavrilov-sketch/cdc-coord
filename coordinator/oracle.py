@@ -48,6 +48,25 @@ def _qualified_table_name(schema: str, table: str) -> str:
     return f"{_quote_identifier(schema)}.{_quote_identifier(table)}"
 
 
+def _build_pk_range_chunks(
+    pk_col: str, pk_from: int, pk_to: int, chunk_size: int, use_scn: bool
+) -> list[RowIdChunk]:
+    """Divide [pk_from, pk_to] into RowIdChunk intervals of chunk_size rows (by PK range)."""
+    if pk_from > pk_to:
+        return []
+    chunks: list[RowIdChunk] = []
+    current = pk_from
+    while current <= pk_to:
+        end = current + chunk_size - 1
+        chunks.append(RowIdChunk(
+            start_rowid=None,
+            end_rowid=None,
+            chunk_meta={"pk_col": pk_col, "pk_from": current, "pk_to": end, "use_scn": use_scn},
+        ))
+        current = end + 1
+    return chunks
+
+
 @dataclass(slots=True)
 class OracleClientConfig:
     dsn: str
@@ -352,6 +371,76 @@ class OracleIntrospector:
             table_name, len(recent), len(historical), recent_rows, chunk_size,
         )
         return recent, historical
+
+    def read_max_pk(self, table_name: str, pk_col: str) -> int | None:
+        """Read MAX(pk_col) from the source table. Returns None if the table is empty."""
+        if not self._source:
+            raise ValidationError("Oracle source connection is not configured")
+        schema, table = _resolve_table_name(table_name, self._source_schema)
+        qualified = _qualified_table_name(schema, table)
+        with self._connect(self._source) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'SELECT MAX("{pk_col}") FROM {qualified}')
+                row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def build_pk_split_chunks(
+        self,
+        table_name: str,
+        chunk_size: int,
+        split_pk: int,
+        pk_col: str,
+    ) -> tuple[list[RowIdChunk], list[RowIdChunk]]:
+        """Build (tail_chunks, history_chunks) split at split_pk.
+
+        tail_chunks:    WHERE pk_col >= split_pk — loaded AS OF SCN (use_scn=True).
+        history_chunks: WHERE pk_col <  split_pk — loaded without SCN (use_scn=False),
+                        started after the tail job reaches bulk_done.
+        Chunking is by equal PK-range intervals of chunk_size.
+        """
+        if not self._source:
+            raise ValidationError("Oracle source connection is not configured")
+        schema, table = _resolve_table_name(table_name, self._source_schema)
+        qualified = _qualified_table_name(schema, table)
+        with self._connect(self._source) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'SELECT MIN("{pk_col}"), MAX("{pk_col}") FROM {qualified}')
+                row = cur.fetchone()
+
+        if not row or row[0] is None:
+            # Empty table: one tail sentinel chunk
+            return [RowIdChunk(
+                start_rowid=None,
+                end_rowid=None,
+                chunk_meta={"pk_col": pk_col, "pk_from": split_pk, "pk_to": None, "use_scn": True},
+            )], []
+
+        min_pk = int(row[0])
+        max_pk = int(row[1])
+
+        tail_chunks = _build_pk_range_chunks(pk_col, split_pk, max_pk, chunk_size, use_scn=True)
+        if not tail_chunks:
+            # split_pk > max_pk: no tail rows at snapshot moment; create one empty sentinel
+            tail_chunks = [RowIdChunk(
+                start_rowid=None,
+                end_rowid=None,
+                chunk_meta={"pk_col": pk_col, "pk_from": split_pk, "pk_to": split_pk, "use_scn": True},
+            )]
+
+        history_chunks = (
+            _build_pk_range_chunks(pk_col, min_pk, split_pk - 1, chunk_size, use_scn=False)
+            if min_pk < split_pk else []
+        )
+
+        logger.info(
+            "PK split for %s: split_pk=%d, %d tail chunks (pk>=%d, AS OF SCN),"
+            " %d history chunks (pk<%d, no SCN), chunk_size=%d",
+            table_name, split_pk,
+            len(tail_chunks), split_pk,
+            len(history_chunks), split_pk,
+            chunk_size,
+        )
+        return tail_chunks, history_chunks
 
     def build_rowid_chunks(self, table_name: str, chunk_size: int) -> list[RowIdChunk]:
         if not self._source:

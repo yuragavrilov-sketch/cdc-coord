@@ -51,6 +51,7 @@ class SqlTemplateRecord:
 class RowIdChunk:
     start_rowid: str | None
     end_rowid: str | None
+    chunk_meta: dict[str, Any] | None = None  # used by cdc_pk_split: pk range filter + use_scn flag
 
 
 @dataclass(slots=True)

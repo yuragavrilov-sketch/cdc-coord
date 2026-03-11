@@ -66,6 +66,7 @@ class CreateJobRequest:
     idempotency_key: str | None
     chunk_size: int | None
     recent_rows: int | None = None  # hybrid mode: rows for CDC phase (rest → static background)
+    pk_split_col: str | None = None  # cdc_pk_split mode: PK column used for the split
 
 
 class CoordinatorService:
@@ -106,8 +107,8 @@ class CoordinatorService:
 
     def create_job(self, request: CreateJobRequest) -> JobRecord:
         mode = request.migration_mode.lower().strip()
-        if mode not in {"cdc", "static", "hybrid"}:
-            raise ValidationError("migration_mode must be 'cdc', 'static', or 'hybrid'")
+        if mode not in {"cdc", "static", "hybrid", "cdc_pk_split"}:
+            raise ValidationError("migration_mode must be 'cdc', 'static', 'hybrid', or 'cdc_pk_split'")
 
         source_table, source_schema, source_table_only = _resolve_table_identifier(
             request.table_name,
@@ -121,7 +122,7 @@ class CoordinatorService:
         metadata = self._oracle.fetch_table_metadata(target_table)
 
         key_columns = self._resolve_key_columns(
-            migration_mode=mode if mode != "hybrid" else "cdc",
+            migration_mode=mode if mode not in ("hybrid", "cdc_pk_split") else "cdc",
             metadata=metadata,
             message_key_columns=request.message_key_columns,
         )
@@ -139,6 +140,25 @@ class CoordinatorService:
                 idempotency_key=request.idempotency_key,
                 chunk_size=chunk_size,
                 recent_rows=request.recent_rows or self._config.hybrid_recent_rows,
+            )
+
+        if mode == "cdc_pk_split":
+            pk_split_col = request.pk_split_col or (key_columns[0] if key_columns else None)
+            if not pk_split_col:
+                raise ValidationError(
+                    "pk_split_col is required for cdc_pk_split mode",
+                    details={"table_name": source_table},
+                )
+            return self._create_cdc_pk_split_job(
+                source_table=source_table,
+                source_schema=source_schema,
+                source_table_only=source_table_only,
+                target_table=target_table,
+                metadata=metadata,
+                key_columns=key_columns,
+                idempotency_key=request.idempotency_key,
+                chunk_size=chunk_size,
+                pk_split_col=pk_split_col,
             )
 
         if mode == "cdc":
@@ -439,6 +459,140 @@ class CoordinatorService:
                 child_job_id=child_job_id,
             )
 
+        return parent_job
+
+    def _create_cdc_pk_split_job(
+        self,
+        *,
+        source_table: str,
+        source_schema: str,
+        source_table_only: str,
+        target_table: str,
+        metadata: OracleTableMetadata,
+        key_columns: list[str],
+        idempotency_key: str | None,
+        chunk_size: int,
+        pk_split_col: str,
+    ) -> JobRecord:
+        """Create a cdc_pk_split migration.
+
+        Flow:
+        1. Fix SCN and MAX(pk_split_col) = split_pk.
+        2. Start Debezium from SCN (captures all changes going forward).
+        3. Parent CDC job: tail chunks (pk >= split_pk) — loaded AS OF SCN.
+        4. Child static job: history chunks (pk < split_pk) — loaded without SCN,
+           activated when parent reaches bulk_done (same mechanism as hybrid).
+        """
+        job_id = str(uuid.uuid4())
+        scn_cutoff = self._oracle.read_current_scn()
+        split_pk = self._oracle.read_max_pk(source_table, pk_split_col)
+        if split_pk is None:
+            raise ValidationError(
+                "Cannot determine split PK: table appears to be empty",
+                details={"table_name": source_table, "pk_col": pk_split_col},
+            )
+
+        connector_name, topic_name, consumer_group = self._build_runtime_names(
+            source_schema, source_table_only, job_id
+        )
+        debezium_config = self._build_debezium_config(
+            connector_name=connector_name,
+            source_table=source_table,
+            source_schema=source_schema,
+            source_table_only=source_table_only,
+            topic_name=topic_name,
+            scn_cutoff=scn_cutoff,
+            key_columns=key_columns,
+            metadata=metadata,
+        )
+        self._debezium.create_connector(connector_name, debezium_config)
+
+        parent_job = self._repository.create_job(
+            job_id=job_id,
+            table_name=source_table,
+            target_table_name=target_table,
+            migration_mode="cdc",
+            message_key_columns=None if metadata.pk_columns else key_columns,
+            scn_cutoff=scn_cutoff,
+            connector_name=connector_name,
+            topic_name=topic_name,
+            consumer_group_name=consumer_group,
+            debezium_config=debezium_config,
+            status="cdc_accumulating",
+            idempotency_key=idempotency_key,
+            parent_job_id=None,
+        )
+
+        sql_templates = build_sql_templates(
+            job_id=parent_job.job_id,
+            table_name=target_table,
+            metadata=metadata,
+            key_columns=key_columns,
+            migration_mode="cdc",
+        )
+        self._repository.save_sql_templates(sql_templates)
+
+        self._debezium.wait_for_running(
+            connector_name,
+            timeout_seconds=self._config.monitor_connector_start_timeout_seconds,
+            poll_interval_seconds=self._config.monitor_connector_poll_interval_seconds,
+        )
+
+        tail_chunks, history_chunks = self._oracle.build_pk_split_chunks(
+            source_table, chunk_size, split_pk, pk_split_col
+        )
+        self._repository.save_chunks(parent_job.job_id, source_table, tail_chunks)
+        parent_job = self._repository.update_job_status(parent_job.job_id, "bulk_running")
+
+        child_job_id: str | None = None
+        if history_chunks:
+            child_job = self._repository.create_job(
+                job_id=None,
+                table_name=source_table,
+                target_table_name=target_table,
+                migration_mode="static",
+                message_key_columns=None,
+                scn_cutoff=None,
+                connector_name=None,
+                topic_name=None,
+                consumer_group_name=None,
+                debezium_config=None,
+                status="pending",
+                idempotency_key=None,
+                parent_job_id=parent_job.job_id,
+            )
+            child_sql_templates = build_sql_templates(
+                job_id=child_job.job_id,
+                table_name=target_table,
+                metadata=metadata,
+                key_columns=key_columns,
+                migration_mode="static",
+            )
+            self._repository.save_sql_templates(child_sql_templates)
+            self._repository.save_chunks(child_job.job_id, source_table, history_chunks)
+            child_job_id = child_job.job_id
+            logger.info(
+                "cdc_pk_split job created: split_pk=%d, pk_col=%s,"
+                " %d tail chunks (AS OF SCN) + %d history chunks (static child)",
+                split_pk, pk_split_col, len(tail_chunks), len(history_chunks),
+                extra={"parent_job_id": parent_job.job_id, "child_job_id": child_job.job_id},
+            )
+        else:
+            logger.info(
+                "cdc_pk_split job created: split_pk=%d, pk_col=%s, %d tail chunks (no history)",
+                split_pk, pk_split_col, len(tail_chunks),
+                extra={"parent_job_id": parent_job.job_id},
+            )
+
+        if self._notifier:
+            total_chunks = len(tail_chunks) + len(history_chunks)
+            self._notifier.notify_job_added(
+                table_name=source_table,
+                mode="cdc_pk_split",
+                chunk_count=total_chunks,
+                job_id=parent_job.job_id,
+                child_job_id=child_job_id,
+            )
         return parent_job
 
     def _create_static_job(

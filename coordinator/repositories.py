@@ -101,6 +101,10 @@ class CoordinatorRepository:
                         "CREATE INDEX IF NOT EXISTS idx_chunks_job_status ON migration_system.migration_chunks (job_id, status)"
                     )
                     cur.execute(
+                        "ALTER TABLE migration_system.migration_chunks"
+                        " ADD COLUMN IF NOT EXISTS chunk_meta JSONB"
+                    )
+                    cur.execute(
                         """
                         CREATE TABLE IF NOT EXISTS migration_system.migration_sql_templates (
                             job_id UUID PRIMARY KEY REFERENCES migration_system.migration_jobs(job_id),
@@ -251,10 +255,17 @@ class CoordinatorRepository:
                     cur.execute(
                         """
                         INSERT INTO migration_system.migration_chunks (
-                            chunk_id, job_id, table_name, start_rowid, end_rowid, status
-                        ) VALUES (%s, %s, %s, %s, %s, 'pending')
+                            chunk_id, job_id, table_name, start_rowid, end_rowid, chunk_meta, status
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 'pending')
                         """,
-                        (str(uuid.uuid4()), job_id, table_name, chunk.start_rowid, chunk.end_rowid),
+                        (
+                            str(uuid.uuid4()),
+                            job_id,
+                            table_name,
+                            chunk.start_rowid,
+                            chunk.end_rowid,
+                            Json(chunk.chunk_meta) if chunk.chunk_meta is not None else None,
+                        ),
                     )
 
     def update_job_status(self, job_id: str, status: str, *, completed: bool = False) -> JobRecord:
@@ -652,7 +663,7 @@ class CoordinatorRepository:
                         LIMIT 1
                         FOR UPDATE OF c SKIP LOCKED
                     )
-                    RETURNING chunk_id, job_id, table_name, start_rowid, end_rowid
+                    RETURNING chunk_id, job_id, table_name, start_rowid, end_rowid, chunk_meta
                     """
 
     def claim_bulk_chunk(self, worker_id: str, max_per_job: int = 0) -> dict[str, Any] | None:

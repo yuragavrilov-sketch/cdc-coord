@@ -43,8 +43,8 @@ def build_api_blueprint(
         migration_mode = (payload.get("migration_mode") or "").strip().lower()
         if not table_name:
             raise ValidationError("table_name is required")
-        if migration_mode not in {"cdc", "static", "hybrid"}:
-            raise ValidationError("migration_mode must be 'cdc', 'static', or 'hybrid'")
+        if migration_mode not in {"cdc", "static", "hybrid", "cdc_pk_split"}:
+            raise ValidationError("migration_mode must be 'cdc', 'static', 'hybrid', or 'cdc_pk_split'")
 
         raw_key_columns = payload.get("message_key_columns")
         if raw_key_columns is not None and not isinstance(raw_key_columns, list):
@@ -61,6 +61,8 @@ def build_api_blueprint(
             except (TypeError, ValueError):
                 raise ValidationError("recent_rows must be a positive integer")
 
+        pk_split_col = (payload.get("pk_split_col") or "").strip() or None
+
         create_request = CreateJobRequest(
             table_name=table_name,
             target_table_name=payload.get("target_table_name"),
@@ -69,6 +71,7 @@ def build_api_blueprint(
             idempotency_key=request.headers.get("Idempotency-Key") or payload.get("idempotency_key"),
             chunk_size=payload.get("chunk_size"),
             recent_rows=raw_recent_rows,
+            pk_split_col=pk_split_col,
         )
         job = service.create_job(create_request)
         return jsonify(job.to_dict()), 201
