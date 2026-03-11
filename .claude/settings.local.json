@@ -6,7 +6,8 @@
       "Bash(python -c \"from coordinator.worker import CompareWorker, BulkWorker, CDCWorker, MigrationWorker; print\\(''worker OK''\\)\")",
       "Bash(python -c \"from coordinator.routes import build_api_blueprint; print\\(''routes OK''\\)\")",
       "Bash(python -c \"import worker; print\\(''worker entry OK''\\)\")",
-      "Bash(python -c \"from coordinator.worker import CompareWorker; print\\(''OK''\\)\")"
+      "Bash(python -c \"from coordinator.worker import CompareWorker; print\\(''OK''\\)\")",
+      "Bash(python -c \":*)"
     ]
   }
 }

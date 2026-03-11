@@ -833,7 +833,7 @@ class CompareWorker:
             extra={"task_id": task_id, "source_table": source_table, "worker_id": self._worker_id},
         )
         try:
-            result_summary, sample_diffs = self._compare_tables(source_table, target_table, pk_columns)
+            result_summary, sample_diffs = self._compare_tables(task_id, source_table, target_table, pk_columns)
             self._repository.complete_compare_task(task_id, result_summary, sample_diffs)
             logger.info("Compare task completed", extra={"task_id": task_id, "summary": result_summary})
         except Exception as exc:
@@ -852,8 +852,13 @@ class CompareWorker:
             return f'"{default_schema.upper()}"."{table_name.upper()}"'
         return _qualified_table(table_name)
 
+    def _progress(self, task_id: str, message: str) -> None:
+        logger.info("Compare progress: %s", message, extra={"task_id": task_id})
+        self._repository.update_compare_task_progress(task_id, message)
+
     def _compare_tables(
         self,
+        task_id: str,
         source_table: str,
         target_table: str,
         pk_columns: list[str],
@@ -864,17 +869,30 @@ class CompareWorker:
         src_qual = self._qualify(source_table, self._config.oracle_source_schema)
         tgt_qual = self._qualify(target_table, self._config.oracle_target_schema)
 
+        self._progress(task_id, "Подключение к базам данных…")
+
         with _oracle_connect(src_dsn, src_user, src_pwd) as src_conn, \
              _oracle_connect(tgt_dsn, tgt_user, tgt_pwd) as tgt_conn:
 
+            self._progress(task_id, "Подсчёт строк в source…")
             src_count = self._count_rows(src_conn, src_qual)
+
+            self._progress(task_id, f"Source: {src_count:,} строк. Подсчёт строк в target…")
             tgt_count = self._count_rows(tgt_conn, tgt_qual)
+
+            count_diff = src_count - tgt_count
+            count_msg = "совпадает" if count_diff == 0 else f"разница {count_diff:+,}"
+            self._progress(
+                task_id,
+                f"Source: {src_count:,} | Target: {tgt_count:,} ({count_msg}). "
+                + ("Сравнение PK…" if pk_columns else "PK не указаны."),
+            )
 
             result_summary: dict[str, Any] = {
                 "source_count": src_count,
                 "target_count": tgt_count,
                 "count_match": src_count == tgt_count,
-                "count_diff": src_count - tgt_count,
+                "count_diff": count_diff,
             }
             sample_diffs: list[dict[str, Any]] = []
 
@@ -882,11 +900,23 @@ class CompareWorker:
                 result_summary["pk_comparison"] = "skipped — no PK columns specified"
                 return result_summary, sample_diffs
 
+            self._progress(task_id, f"Загрузка PK из source (до 10 000)…")
             missing_in_target = self._find_missing_pks(
-                src_conn, tgt_conn, src_qual, tgt_qual, pk_columns
+                src_conn, tgt_conn, src_qual, tgt_qual, pk_columns,
+                progress_cb=lambda n: self._progress(
+                    task_id, f"Поиск отсутствующих в target: проверено ~{n:,} PK…"
+                ),
+            )
+
+            self._progress(
+                task_id,
+                f"Отсутствует в target: {len(missing_in_target)}. Проверка обратного направления…",
             )
             missing_in_source = self._find_missing_pks(
-                tgt_conn, src_conn, tgt_qual, src_qual, pk_columns
+                tgt_conn, src_conn, tgt_qual, src_qual, pk_columns,
+                progress_cb=lambda n: self._progress(
+                    task_id, f"Поиск отсутствующих в source: проверено ~{n:,} PK…"
+                ),
             )
 
             result_summary["missing_in_target_count"] = len(missing_in_target)
@@ -914,6 +944,7 @@ class CompareWorker:
         source_qual: str,
         check_qual: str,
         pk_columns: list[str],
+        progress_cb: Any = None,
     ) -> list[Any]:
         """Return PK values present in source_conn but absent in check_conn (up to 2×MAX_SAMPLE)."""
         pk_cols_sql = ", ".join(f'"{c}"' for c in pk_columns)
@@ -927,6 +958,7 @@ class CompareWorker:
 
         missing: list[Any] = []
         batch_size = 500
+        checked = 0
         for i in range(0, len(source_pks), batch_size):
             batch = source_pks[i : i + batch_size]
             if len(pk_columns) == 1:
@@ -954,5 +986,9 @@ class CompareWorker:
                     missing.append(list(row) if len(pk_columns) > 1 else row[0])
                     if len(missing) >= self._MAX_SAMPLE * 2:
                         return missing
+
+            checked += len(batch)
+            if progress_cb:
+                progress_cb(checked)
 
         return missing

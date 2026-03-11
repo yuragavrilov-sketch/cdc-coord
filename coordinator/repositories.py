@@ -156,12 +156,17 @@ class CoordinatorRepository:
                             assigned_worker_id VARCHAR(100),
                             assigned_at TIMESTAMP,
                             completed_at TIMESTAMP,
+                            progress_message TEXT,
                             result_summary JSONB,
                             sample_diffs JSONB,
                             error_message TEXT,
                             created_at TIMESTAMP DEFAULT NOW()
                         )
                         """
+                    )
+                    cur.execute(
+                        "ALTER TABLE migration_system.migration_compare_tasks"
+                        " ADD COLUMN IF NOT EXISTS progress_message TEXT"
                     )
                     cur.execute(
                         "CREATE INDEX IF NOT EXISTS idx_compare_tasks_status ON migration_system.migration_compare_tasks (status)"
@@ -1179,6 +1184,14 @@ class CoordinatorRepository:
                 )
                 row = cur.fetchone()
         return dict(row) if row else None
+
+    def update_compare_task_progress(self, task_id: str, message: str) -> None:
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE migration_system.migration_compare_tasks SET progress_message = %s WHERE task_id = %s",
+                    (message, task_id),
+                )
 
     def complete_compare_task(
         self,

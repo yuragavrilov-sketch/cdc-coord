@@ -1552,7 +1552,10 @@
         function renderCompareSummary(task) {
           const s = task.result_summary;
           if (task.status === "pending")   return '<span class="muted">ожидание</span>';
-          if (task.status === "running")   return '<span class="muted">выполняется…</span>';
+          if (task.status === "running") {
+            const prog = task.progress_message ? escHtml(task.progress_message) : "выполняется…";
+            return `<span class="muted" id="prog-${escHtml(task.task_id)}">${prog}</span>`;
+          }
           if (task.status === "failed")    return `<span class="bad">Ошибка</span>` + (task.error_message ? `: ${escHtml(String(task.error_message).slice(0, 120))}` : "");
           if (!s) return '<span class="muted">—</span>';
 
@@ -1616,6 +1619,42 @@
             }
           }
         });
+
+        /* ─── Compare tasks progress poller ─── */
+        (function () {
+          let _cmpPollTimer = null;
+
+          function _pollRunningTasks() {
+            const progressSpans = document.querySelectorAll("[id^='prog-']");
+            if (progressSpans.length === 0) return;
+
+            progressSpans.forEach(async function (span) {
+              const taskId = span.id.replace("prog-", "");
+              try {
+                const task = await fetchJson("/api/v1/compare-tasks/" + encodeURIComponent(taskId));
+                if (task.status === "running") {
+                  span.textContent = task.progress_message || "выполняется…";
+                } else {
+                  // Task finished — reload the full list
+                  loadCompareTasks();
+                }
+              } catch { /* ignore polling errors */ }
+            });
+          }
+
+          // Start polling when the Compare tab becomes active, stop otherwise
+          document.querySelectorAll(".tab-btn").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              clearInterval(_cmpPollTimer);
+              _cmpPollTimer = null;
+              if (btn.dataset.tab === "compare") {
+                _cmpPollTimer = setInterval(function () {
+                  _pollRunningTasks();
+                }, 2000);
+              }
+            });
+          });
+        })();
 
       })();
     </script>
