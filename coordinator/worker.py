@@ -1313,7 +1313,11 @@ class SchemaCompareWorker:
             cur.execute(
                 """
                 SELECT c.constraint_name, c.constraint_type, c.status,
-                       c.validated, TO_CHAR(c.search_condition) AS search_condition,
+                       c.validated,
+                       (SELECT TO_CHAR(c2.search_condition)
+                          FROM all_constraints c2
+                         WHERE c2.owner = c.owner
+                           AND c2.constraint_name = c.constraint_name) AS search_condition,
                        c.r_owner, c.r_constraint_name,
                        LISTAGG(cc.column_name, ',')
                            WITHIN GROUP (ORDER BY cc.position) AS columns
@@ -1323,7 +1327,7 @@ class SchemaCompareWorker:
                 WHERE c.owner = :owner AND c.table_name = :tbl
                   AND c.constraint_type IN ('P','U','C','R')
                 GROUP BY c.constraint_name, c.constraint_type, c.status,
-                         c.validated, TO_CHAR(c.search_condition), c.r_owner, c.r_constraint_name
+                         c.validated, c.r_owner, c.r_constraint_name
                 ORDER BY c.constraint_type, c.constraint_name
                 """,
                 {"owner": owner, "tbl": table_name},
